@@ -1,0 +1,24 @@
+﻿# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+env/
+venv/
+
+# Credentials / tokens (VERY IMPORTANT)
+token.json
+credentials.json
+*.key
+*.pem
+
+# Local artifacts
+*.log
+logs/
+tmp/
+.env
+
+# Docker build cache (optional)
+.dist/
+build/
