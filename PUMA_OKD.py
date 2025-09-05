@@ -178,15 +178,19 @@ def _read_master_sheet_csv(file_bytes, project_name, filename):
 
 # =========================== Gmail =============================
 def get_emails(gmail_service):
-    print("Fetching emails from PUMA inbox...")
-    q = "label:PUMA subject:OKD has:attachment is:unread"
+    print("Fetching OKD emails from PUMA inbox...")
     out = []
-    req = gmail_service.users().messages().list(userId="me", q=q, maxResults=100)
+    req = gmail_service.users().messages().list(
+        userId="me",
+        labelIds=["Label_1716122347040870890"],   # <-- your real PUMA - OKD label ID
+        q="is:unread has:attachment",
+        maxResults=100
+    )
     while req is not None:
         resp = req.execute()
         out.extend(resp.get("messages", []))
         req = gmail_service.users().messages().list_next(previous_request=req, previous_response=resp)
-    print(f"Found {len(out)} unread PUMA email(s).") if out else print("No new emails found with the PUMA label.")
+    print(f"Found {len(out)} unread OKD email(s).") if out else print("No new OKD emails found.")
     return out
 
 

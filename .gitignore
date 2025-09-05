@@ -22,3 +22,8 @@ tmp/
 # Docker build cache (optional)
 .dist/
 build/
+
+client_secrets.json
+token.json
+secrets/**
+

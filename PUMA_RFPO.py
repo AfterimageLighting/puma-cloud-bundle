@@ -12,7 +12,22 @@ SCOPES = [
 DEBUG = True
 
 # Behavior
-GMAIL_QUERY = 'label:PUMA is:unread subject:"RFPO"'
+
+def list_dr_messages(gmail):
+    """Return a list of Gmail message IDs for unread Requests for Purchase Orders under PUMA - DR."""
+    messages = []
+    request = gmail.users().messages().list(
+        userId="me",
+        labelIds=["Label_1550910640571640980"],           # <-- put the actual PUMA - RFPO label ID here
+        q="is:unread",            # keep it unread
+        maxResults=50
+    )
+    while request is not None:
+        response = request.execute()
+        messages.extend(response.get("messages", []))
+        request = gmail.users().messages().list_next(previous_request=request, previous_response=response)
+    return messages
+
 ALLOCATE_BY_QTY = True   # True = allocate qty across duplicate parts; False = approve all matches
 
 # ============================ Deps ============================
@@ -92,8 +107,14 @@ def _ensure_unmatched_tab(sheets) -> str:
 
 # ============================ Gmail ============================
 def list_rfpo_messages(gmail):
+    """Return unread RFPO emails under the PUMA - RFPO label."""
     msgs = []
-    req = gmail.users().messages().list(userId="me", q=GMAIL_QUERY, maxResults=100)
+    req = gmail.users().messages().list(
+        userId="me",
+        labelIds=["Label_1550910640571640980"],   # <-- replace with your actual RFPO label ID
+        q="is:unread has:attachment",
+        maxResults=100
+    )
     while req is not None:
         resp = req.execute()
         msgs.extend(resp.get("messages", []))

@@ -5,7 +5,20 @@ import os, re, io, sys, base64, datetime
 from typing import List, Tuple, Dict
 
 SPREADSHEET_ID = '1pwVlYSGVjyTCLt4GT7xU2TCnxfdJuxAbp_jU6Snisls'
-GMAIL_QUERY = 'label:PUMA is:unread has:attachment subject:"Delivery Report"'
+def list_dr_messages(gmail):
+    """Return a list of Gmail message IDs for unread Delivery Reports under PUMA - DR."""
+    messages = []
+    request = gmail.users().messages().list(
+        userId="me",
+        labelIds=["Label_5049817258591074090"],           # <-- put the actual PUMA - DR label ID here
+        q="is:unread has:attachment",            # keep it unread + attachment
+        maxResults=50
+    )
+    while request is not None:
+        response = request.execute()
+        messages.extend(response.get("messages", []))
+        request = gmail.users().messages().list_next(previous_request=request, previous_response=response)
+    return messages
 DR_BASE_FOLDER_ID = "1b6W8VNs77TA-UC5j-8NryQxlAebXYSyI"
 MAKE_LINK_PUBLIC = False
 DEBUG = True
@@ -57,15 +70,6 @@ def setup_services():
         print(f"Auth error: {e}"); return None, None, None
 
 # ---------- Gmail ----------
-def list_dr_messages(gmail):
-    msgs, req = [], gmail.users().messages().list(userId="me", q=GMAIL_QUERY, maxResults=50).execute()
-    msgs += req.get("messages", []) if req else []
-    next_req = gmail.users().messages().list_next(None, req)
-    while next_req is not None:
-        resp = next_req.execute(); msgs += resp.get("messages", []); next_req = gmail.users().messages().list_next(next_req, resp)
-    if DEBUG: print(f"[DR] Found {len(msgs)} email(s).")
-    return msgs
-
 def get_subject_attachments_timestamp(gmail, msg_id):
     msg = gmail.users().messages().get(userId="me", id=msg_id, format="full").execute()
     subject = next((h["value"] for h in msg["payload"].get("headers", []) if h["name"].lower()=="subject"), "")

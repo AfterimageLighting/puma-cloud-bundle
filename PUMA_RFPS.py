@@ -9,7 +9,22 @@ import os, re, io, sys, base64, datetime
 from typing import List, Tuple, Dict
 
 SPREADSHEET_ID = '1pwVlYSGVjyTCLt4GT7xU2TCnxfdJuxAbp_jU6Snisls'
-GMAIL_QUERY    = 'label:PUMA is:unread subject:"RFPS"'
+
+def list_dr_messages(gmail):
+    """Return a list of Gmail message IDs for unread Requests for Packing Slips under PUMA - DR."""
+    messages = []
+    request = gmail.users().messages().list(
+        userId="me",
+        labelIds=["Label_5687824868171199039"],           # <-- put the actual PUMA - DR label ID here
+        q="is:unread",            # keep it unread
+        maxResults=50
+    )
+    while request is not None:
+        response = request.execute()
+        messages.extend(response.get("messages", []))
+        request = gmail.users().messages().list_next(previous_request=request, previous_response=response)
+    return messages
+
 DEBUG = ("--debug" in sys.argv)
 
 # ---------- Google API deps ----------
@@ -77,12 +92,18 @@ def _col_letter(idx_zero_based: int) -> str:
 
 # ---------- Gmail ----------
 def list_rfps_messages(gmail):
-    req = gmail.users().messages().list(userId="me", q=GMAIL_QUERY, maxResults=50)
+    """Return unread RFPS emails under the PUMA - RFPS label."""
     msgs = []
+    req = gmail.users().messages().list(
+        userId="me",
+        labelIds=["Label_5687824868171199039"],   # <-- replace with your actual RFPS label ID
+        q="is:unread",                     # RFPS parses from body, so attachments aren't required
+        maxResults=100
+    )
     while req is not None:
         resp = req.execute()
-        msgs += resp.get("messages", [])
-        req = gmail.users().messages().list_next(req, resp)
+        msgs.extend(resp.get("messages", []))
+        req = gmail.users().messages().list_next(previous_request=req, previous_response=resp)
     if DEBUG: print(f"[RFPS] Found {len(msgs)} email(s).")
     return msgs
 

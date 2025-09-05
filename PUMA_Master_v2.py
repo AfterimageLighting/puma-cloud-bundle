@@ -6,13 +6,13 @@ import os, sys, json, time, shlex, subprocess, datetime
 from typing import List, Dict
 
 STEPS = [
-    ("OKD",   "PUMA13_OKD.py",  []),
-    ("RFA",   "PUMA3_RFA.py",   []),
-    ("RFPO",  "PUMA4_RFPO.py",  []),
-    ("PO",    "PUMA17_PO.py",   []),
-    ("RR",    "PUMA6_RR.py",    []),
-    ("RFPS",  "PUMA5_RFPS.py",  []),
-    ("DR",    "PUMA1_DR.py",    []),
+    ("OKD",   "PUMA_OKD.py",  []),
+    ("RFA",   "PUMA_RFA.py",   []),
+    ("RFPO",  "PUMA_RFPO.py",  []),
+    ("PO",    "PUMA_PO.py",   []),
+    ("RR",    "PUMA_RR.py",    []),
+    ("RFPS",  "PUMA_RFPS.py",  []),
+    ("DR",    "PUMA_DR.py",    []),
 ]
 
 UNION_SCOPES = [
@@ -252,3 +252,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

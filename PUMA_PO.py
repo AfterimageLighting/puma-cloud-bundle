@@ -8,7 +8,22 @@ import os, re, io, sys, base64, datetime, difflib
 from typing import List, Tuple, Dict
 
 SPREADSHEET_ID = '1pwVlYSGVjyTCLt4GT7xU2TCnxfdJuxAbp_jU6Snisls'
-GMAIL_QUERY = 'label:PUMA is:unread subject:"PO -" has:attachment'
+
+def list_dr_messages(gmail):
+    """Return a list of Gmail message IDs for unread Purchase Orders under PUMA - DR."""
+    messages = []
+    request = gmail.users().messages().list(
+        userId="me",
+        labelIds=["Label_5738022985181196652"],           # <-- put the actual PUMA - PO label ID here
+        q="is:unread has:attachment",            # keep it unread + attachment
+        maxResults=50
+    )
+    while request is not None:
+        response = request.execute()
+        messages.extend(response.get("messages", []))
+        request = gmail.users().messages().list_next(previous_request=request, previous_response=response)
+    return messages
+
 PO_BASE_FOLDER_ID = "1VlCypDA_iF5dEUmA9c3E7ABYyS4-m6W2"
 MAKE_LINK_PUBLIC = False
 DEBUG = True
@@ -62,11 +77,20 @@ def setup_services():
 
 # ---------- Gmail ----------
 def list_po_messages(gmail):
-    msgs, req = [], gmail.users().messages().list(userId="me", q=GMAIL_QUERY, maxResults=50)
-    while req is not None:
-        resp = req.execute(); msgs += resp.get("messages", []); req = gmail.users().messages().list_next(req, resp)
-    if DEBUG: print(f"[PO] Found {len(msgs)} email(s).")
-    return msgs
+    """Return unread PO emails under the PUMA - PO label."""
+    messages = []
+    request = gmail.users().messages().list(
+        userId="me",
+        labelIds=["Label_PO_ID_HERE"],   # <-- replace with your actual PUMA - PO label ID
+        q="is:unread has:attachment",
+        maxResults=50
+    )
+    while request is not None:
+        response = request.execute()
+        messages.extend(response.get("messages", []))
+        request = gmail.users().messages().list_next(previous_request=request, previous_response=response)
+    if DEBUG: print(f"[PO] Found {len(messages)} email(s).")
+    return messages
 
 def get_subject_and_attachments(gmail, msg_id):
     msg = gmail.users().messages().get(userId="me", id=msg_id, format="full").execute()

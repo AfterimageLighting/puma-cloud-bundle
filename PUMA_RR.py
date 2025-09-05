@@ -8,7 +8,6 @@ import os, re, io, sys, base64, datetime
 from typing import List, Tuple, Dict
 
 SPREADSHEET_ID = '1pwVlYSGVjyTCLt4GT7xU2TCnxfdJuxAbp_jU6Snisls'
-GMAIL_QUERY = 'label:PUMA is:unread has:attachment subject:"Receiving Report"'
 RR_BASE_FOLDER_ID = "1ZpATQXv7owmljEpLYrTvpuHgNU8nSPxC"
 MAKE_LINK_PUBLIC = False
 DEBUG = True
@@ -61,12 +60,20 @@ def setup_services():
 
 # ---------- Gmail ----------
 def list_rr_messages(gmail):
-    msgs, req = [], gmail.users().messages().list(userId="me", q=GMAIL_QUERY, maxResults=50).execute()
-    msgs += req.get("messages", []) if req else []
-    next_req = gmail.users().messages().list_next(None, req)
-    while next_req is not None:
-        resp = next_req.execute(); msgs += resp.get("messages", []); next_req = gmail.users().messages().list_next(next_req, resp)
-    if DEBUG: print(f"[RR] Found {len(msgs)} email(s).")
+    """Return unread Receiving Report emails under the PUMA - RR label."""
+    msgs = []
+    req = gmail.users().messages().list(
+        userId="me",
+        labelIds=["Label_2658737210853877023"],   # <-- replace with your real RR label ID
+        q="is:unread has:attachment",
+        maxResults=50
+    )
+    while req is not None:
+        resp = req.execute()
+        msgs.extend(resp.get("messages", []))
+        req = gmail.users().messages().list_next(previous_request=req, previous_response=resp)
+    if DEBUG: 
+        print(f"[RR] Found {len(msgs)} email(s).")
     return msgs
 
 def get_subject_attachments_timestamp(gmail, msg_id):
