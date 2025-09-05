@@ -178,15 +178,18 @@ def _read_master_sheet_csv(file_bytes, project_name, filename):
 # =========================== Gmail =============================
 def get_emails(gmail_service):
     print("Fetching emails from PUMA inbox...")
-    # RFA subject filter and unread with attachments
-    q = "label:PUMA subject:RFA has:attachment is:unread"
     out = []
-    req = gmail_service.users().messages().list(userId="me", q=q, maxResults=100)
+    req = gmail_service.users().messages().list(
+        userId="me",
+        labelIds=["Label_216878436602330283"],   # <-- put actual PUMA - RFA label ID here
+        q="is:unread has:attachment",
+        maxResults=100
+    )
     while req is not None:
         resp = req.execute()
         out.extend(resp.get("messages", []))
         req = gmail_service.users().messages().list_next(previous_request=req, previous_response=resp)
-    print(f"Found {len(out)} unread PUMA email(s).") if out else print("No new emails found with the PUMA label.")
+    print(f"Found {len(out)} unread RFA email(s).") if out else print("No new RFA emails found.")
     return out
 
 def _is_rfa_subject(s: str) -> bool:
