@@ -1,5 +1,17 @@
 ﻿import os, sys, json, subprocess, threading, pathlib
 from flask import Flask, request, jsonify, Response
+from lease import run_with_lease
+
+def _puma_job(run_id: str, holder: str):
+    """
+    Called inside the lease. Returns a dict you’ll see in the HTTP response.
+    """
+    if not ensure_secrets():
+        # Non-fatal: still return 200 from the handler; body will show the issue.
+        return {"ok": False, "error": "missing client_secrets.json or token.json"}
+
+    rc = run_master()
+    return {"ok": (rc == 0), "rc": rc, "run_id": run_id, "holder": holder}
 
 APP_DIR = pathlib.Path(__file__).parent
 app = Flask(__name__)
@@ -52,12 +64,16 @@ def health():
 @app.get("/")
 @app.get("/run")
 def handle_run():
-    if not ensure_secrets():
-        return ("missing client_secrets.json", 500, {"Content-Type": "text/plain"})
-    # Run synchronously so the HTTP call completes when the job is done.
-    rc = run_master()
-    status = 200 if rc == 0 else 500
-    return (f"puma run completed with rc={rc}\n", status, {"Content-Type": "text/plain"})
+    # Lease duration can be tuned via env; default 15 min (900s)
+    lease_secs = int(os.getenv("PUMA_LEASE_SECS", "900"))
+
+    outcome = run_with_lease(_puma_job, lease_secs=lease_secs)
+    # Always 200 so Cloud Scheduler won't retry; outcome body tells you what happened.
+    # outcome looks like:
+    #   {"ok": True, "skipped": False, "result": {...}}  when run proceeded
+    #   {"ok": True, "skipped": True,  "reason": "busy"} when another run holds the lease
+    return (json.dumps(outcome), 200, {"Content-Type": "application/json"})
+
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "8080"))
