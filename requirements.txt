@@ -10,3 +10,5 @@ google-auth-oauthlib==1.2.1
 # lxml
 
 Flask==3.0.3
+
+google-cloud-firestore>=2.16.0
