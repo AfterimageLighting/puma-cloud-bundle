@@ -1,5 +1,5 @@
 ﻿# Python slim base
-FROM python:3.13-slim
+FROM python:3.12-slim
 
 # System deps (add more if needed, e.g., poppler-utils)
 RUN apt-get update && apt-get install -y --no-install-recommends \
