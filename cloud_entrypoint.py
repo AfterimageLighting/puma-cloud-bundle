@@ -61,17 +61,24 @@ def run_master():
 def health():
     return "ok", 200
 
+@app.get("/healthz")
+def health():
+    return "ok", 200
+
+# NEW: simple root that does NOT run anything
 @app.get("/")
+def root():
+    return jsonify({
+        "service": "puma-orchestrator",
+        "status": "ready",
+        "routes": ["/healthz", "/run"]
+    }), 200
+
+# ONLY /run kicks off the orchestrator under a Firestore lease
 @app.get("/run")
 def handle_run():
-    # Lease duration can be tuned via env; default 15 min (900s)
     lease_secs = int(os.getenv("PUMA_LEASE_SECS", "900"))
-
     outcome = run_with_lease(_puma_job, lease_secs=lease_secs)
-    # Always 200 so Cloud Scheduler won't retry; outcome body tells you what happened.
-    # outcome looks like:
-    #   {"ok": True, "skipped": False, "result": {...}}  when run proceeded
-    #   {"ok": True, "skipped": True,  "reason": "busy"} when another run holds the lease
     return (json.dumps(outcome), 200, {"Content-Type": "application/json"})
 
 
