@@ -61,10 +61,6 @@ def run_master():
 def health():
     return "ok", 200
 
-@app.get("/healthz")
-def health():
-    return "ok", 200
-
 # NEW: simple root that does NOT run anything
 @app.get("/")
 def root():
