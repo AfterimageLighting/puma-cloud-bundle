@@ -2,112 +2,149 @@ import os
 import uuid
 import threading
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Callable, Optional, Dict, Any
 
+# If set to "1", Firestore is completely bypassed (useful for local runs).
 PUMA_DISABLE_LEASE = os.getenv("PUMA_DISABLE_LEASE") == "1"
 
-def _utcnow():
+def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 class LeaseBusy(Exception):
     """Raised when another run already holds the lease."""
     pass
 
-# ---------- No-op lease (used when disabled or Firestore not present) ----------
+# ----------------- No-op lease (used when disabled or Firestore unavailable) -----------------
 class NoopLease:
     def __init__(self):
-        self.holder = f"noop:{uuid.uuid4().hex[:8]}"
-        self.run_id = datetime.utcnow().strftime("%Y%m%d%H%M%S")
-    def try_acquire(self, lease_secs: int = 900): return True
-    def heartbeat(self, extend_secs: int = 900): pass
-    def release(self): pass
+        self.run_id = uuid.uuid4().hex[:8]
+        self.holder = f"noop:{self.run_id}"
 
-def run_with_lease(do_work, lease_secs: int = 900):
-    """
-    Wraps a job with a Firestore-backed lease.
-    If PUMA_DISABLE_LEASE=1 or Firestore is unavailable, runs immediately.
-    """
+    def acquire(self, *_, **__) -> bool:
+        return True
 
-    if PUMA_DISABLE_LEASE:
-        l = NoopLease()
-        return {"ok": True, "skipped": False, "result": do_work(run_id=l.run_id, holder=l.holder)}
+    def heartbeat(self, *_ , **__):
+        pass
 
-    try:
-        from google.cloud import firestore
-    except Exception:
-        # Firestore not installed or not available
-        l = NoopLease()
-        return {"ok": True, "skipped": False, "result": do_work(run_id=l.run_id, holder=l.holder)}
+    def release(self):
+        pass
 
-    # ---------- Real Firestore lease ----------
-    class Lease:
-        def __init__(self, db: Optional[firestore.Client] = None):
-            self.db = db or firestore.Client()
-            self.doc = self.db.collection("puma_control").document("lease")
-            self.holder = f"puma-runner:{uuid.uuid4().hex[:8]}"
-            self.run_id = datetime.utcnow().strftime("%Y%m%d%H%M%S")
+# ----------------- Firestore-backed lease -----------------
+class FsLease:
+    def __init__(self, project: Optional[str] = None, collection: str = "leases", doc: str = "puma-master"):
+        # Import lazily so module import works even if package is absent.
+        from google.cloud import firestore  # type: ignore
+        self.client = firestore.Client(project=project)
+        self.doc = self.client.collection(collection).document(doc)
+        self.run_id = uuid.uuid4().hex[:8]
+        self.holder = f"{os.getenv('K_SERVICE','local')}:{self.run_id}"
 
-        def try_acquire(self, lease_secs: int = 900) -> bool:
-            @firestore.transactional
-            def _txn(tx: firestore.Transaction):
-                snap = tx.get(self.doc)
-                now = _utcnow()
-                locked_until = snap.get("locked_until") if snap.exists else None
-                if locked_until and locked_until > now:
+    def acquire(self, lease_secs: int) -> bool:
+        now = _utcnow()
+        expire_at = now + timedelta(seconds=lease_secs)
+
+        def txn_op(txn):
+            snap = txn.get(self.doc)
+            if snap.exists:
+                data = snap.to_dict() or {}
+                cur_holder = data.get("holder")
+                cur_expiry = data.get("expire_at")
+                # Firestore returns a datetime (timezone-aware) if written as such
+                if isinstance(cur_expiry, datetime) and cur_expiry.tzinfo is None:
+                    cur_expiry = cur_expiry.replace(tzinfo=timezone.utc)
+                if cur_expiry and cur_expiry > now:
+                    # someone else holds it
                     return False
-                new_until = now + timedelta(seconds=lease_secs)
-                data = {
-                    "locked_until": new_until,
-                    "holder": self.holder,
-                    "run_id": self.run_id,
-                    "started_at": now,
-                    "last_heartbeat": now,
-                    "version": (snap.get("version", 0) + 1) if snap.exists else 1,
-                }
-                tx.set(self.doc, data, merge=True)
-                return True
-            return _txn(self.db.transaction())
+            txn.set(self.doc, {
+                "holder": self.holder,
+                "run_id": self.run_id,
+                "acquired_at": now,
+                "expire_at": expire_at
+            })
+            return True
 
-        def heartbeat(self, extend_secs: int = 900):
-            now = _utcnow()
-            new_until = now + timedelta(seconds=extend_secs)
-            @firestore.transactional
-            def _txn(tx: firestore.Transaction):
-                snap = tx.get(self.doc)
-                if not snap.exists or snap.get("holder") != self.holder:
-                    return
-                tx.update(self.doc, {"locked_until": new_until, "last_heartbeat": now})
-            _txn(self.db.transaction())
+        return self.client.transaction()(txn_op)
 
-        def release(self):
-            now = _utcnow()
-            @firestore.transactional
-            def _txn(tx: firestore.Transaction):
-                snap = tx.get(self.doc)
-                if not snap.exists or snap.get("holder") != self.holder:
-                    return
-                tx.update(self.doc, {"locked_until": now, "holder": None, "run_id": None})
-            _txn(self.db.transaction())
+    def heartbeat(self, extend_secs: int):
+        now = _utcnow()
+        self.doc.update({
+            "last_heartbeat": now,
+            "expire_at": now + timedelta(seconds=extend_secs),
+        })
 
-    l = Lease()
-    if not l.try_acquire(lease_secs=lease_secs):
+    def release(self):
+        # make release idempotent — set expire in the past but keep the record for debugging
+        self.doc.set({
+            "holder": None,
+            "released_at": _utcnow(),
+            "expire_at": _utcnow() - timedelta(seconds=1),
+            "run_id": self.run_id,
+        }, merge=True)
+
+# ----------------- Lease Orchestrator -----------------
+def _make_lease() -> object:
+    """
+    Return a lease object that supports acquire(lease_secs), heartbeat(extend_secs), release()
+    Preference order:
+      1) No-op if PUMA_DISABLE_LEASE=1
+      2) Firestore if google-cloud-firestore is importable
+      3) No-op fallback
+    """
+    if PUMA_DISABLE_LEASE:
+        return NoopLease()
+    try:
+        # Try to create a Firestore client; if it fails, fall back
+        return FsLease()
+    except Exception as e:
+        print(f"[LEASE] Firestore unavailable, using no-op lease: {e}", flush=True)
+        return NoopLease()
+
+def run_with_lease(
+    do_work: Callable[..., Dict[str, Any]],
+    lease_secs: int = 900
+) -> Dict[str, Any]:
+    """
+    Acquire a lease, run do_work(run_id=..., holder=...), send heartbeats, and release.
+    Returns a JSON-serializable dict explaining what happened.
+    """
+    lease = _make_lease()
+
+    # No-op lease: just run
+    if isinstance(lease, NoopLease):
+        result = do_work(run_id=lease.run_id, holder=lease.holder)
+        return {"ok": True, "skipped": False, "result": result, "lease": "noop"}
+
+    # Firestore-backed
+    try:
+        acquired = lease.acquire(lease_secs=lease_secs)
+    except Exception as e:
+        # If Firestore errors, do not block the run — behave like no-op to keep the pipeline alive
+        print(f"[LEASE] acquire error, falling back to run anyway: {e}", flush=True)
+        result = do_work(run_id="fallback", holder="fallback")
+        return {"ok": True, "skipped": False, "result": result, "lease": "error-fallback"}
+
+    if not acquired:
         return {"ok": True, "skipped": True, "reason": "busy"}
 
     stop = threading.Event()
+
     def _hb():
-        try:
-            while not stop.wait(60):  # heartbeat every 60s
-                l.heartbeat(extend_secs=lease_secs)
-        except Exception:
-            pass
+        while not stop.wait(lease_secs * 0.4):
+            try:
+                lease.heartbeat(extend_secs=lease_secs)
+            except Exception:
+                # Heartbeat failures shouldn't kill the run
+                pass
 
     t = threading.Thread(target=_hb, daemon=True)
     t.start()
     try:
-        result = do_work(run_id=l.run_id, holder=l.holder)
+        result = do_work(run_id=lease.run_id, holder=lease.holder)
         return {"ok": True, "skipped": False, "result": result}
     finally:
         stop.set()
         t.join(timeout=2.0)
-        try: l.release()
-        except Exception: pass
+        try:
+            lease.release()
+        except Exception:
+            pass
