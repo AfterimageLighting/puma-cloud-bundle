@@ -21,6 +21,7 @@ COPY PUMA_PO.py /app/PUMA_PO.py
 COPY PUMA_RR.py /app/PUMA_RR.py
 COPY PUMA_RFPS.py /app/PUMA_RFPS.py
 COPY PUMA_DR.py /app/PUMA_DR.py
+COPY lease.py /app/lease.py
 
 # Entrypoint writes secrets from env and runs the master
 COPY cloud_entrypoint.py /app/cloud_entrypoint.py
