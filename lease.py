@@ -63,7 +63,7 @@ class FsLease:
             })
             return True
 
-        return self.client.transaction()(txn_op)
+        return self.client.transaction().run(txn_op)
 
     def heartbeat(self, extend_secs: int):
         now = _utcnow()
