@@ -2,6 +2,7 @@ import os
 import io
 import base64
 import pandas as pd
+import re
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -208,13 +209,10 @@ def get_and_process_emails_single(gmail_service, message_ref):
         headers = payload.get("headers", [])
         subject = next((h["value"] for h in headers if h["name"] == "Subject"), "")
 
-        # Hard gate: ignore non-OKD messages entirely and leave them unread
-        if not _is_okd_subject(subject):
-            if DEBUG:
-                print(f"[SKIP] Not an OKD email: {subject}")
-            return None, []
-
-        project_name = subject.split(" - ", 1)[1] if " - " in subject else subject
+        # We already filtered by the OKD labelId, so don't subject-gate.
+        # Just normalize the subject (strip "Re:" / "Fwd:") and extract the project name.
+        clean = re.sub(r'^(?:re|fwd?|fw)\s*:\s*', '', subject or '', flags=re.I).strip()
+        project_name = clean.split(" - ", 1)[1] if " - " in clean else clean
 
         parsed = []
 
