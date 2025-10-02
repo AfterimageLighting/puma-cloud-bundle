@@ -10,7 +10,7 @@ from typing import List, Tuple, Dict
 SPREADSHEET_ID = '1pwVlYSGVjyTCLt4GT7xU2TCnxfdJuxAbp_jU6Snisls'
 
 def list_dr_messages(gmail):
-    """Return a list of Gmail message IDs for unread Purchase Orders under PUMA - DR."""
+    """Return a list of Gmail message IDs for unread Purchase Orders under PUMA - PO."""
     messages = []
     request = gmail.users().messages().list(
         userId="me",
