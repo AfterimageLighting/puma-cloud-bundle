@@ -17,6 +17,7 @@ COPY PUMA_Master_v2.py /app/PUMA_Master_v2.py
 COPY PUMA_OKD.py /app/PUMA_OKD.py
 COPY PUMA_RFA.py /app/PUMA_RFA.py
 COPY PUMA_RFPO.py /app/PUMA_RFPO.py
+COPY PUMA_PO_clean.py /app/PUMA_PO_clean.py  
 COPY PUMA_PO.py /app/PUMA_PO.py
 COPY PUMA_RR.py /app/PUMA_RR.py
 COPY PUMA_RFPS.py /app/PUMA_RFPS.py
