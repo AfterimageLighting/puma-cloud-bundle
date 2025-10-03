@@ -35,7 +35,15 @@ def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--include-read", action="store_true", help="Backfill mode; include read messages")
     parser.add_argument("--days-back", type=int, default=None, help="Only fetch emails newer than N days")
+    parser.add_argument("--debug", action="store_true", help="Enable verbose logging")      # <— add
+    parser.add_argument("--nodebug", action="store_true", help="Disable verbose logging")    # <— add
     args = parser.parse_args(argv)
+
+    # Toggle debug if flags are passed from the master
+    if args.debug:
+        po.DEBUG = True
+    if args.nodebug:
+        po.DEBUG = False
 
     # Required env vars for the underlying module
     missing = []
