@@ -125,7 +125,13 @@ def msg_subject(msg: Dict[str, Any]) -> str:
 
 def _ensure_subfolder(drive, parent_id: str, name: str) -> str:
     """Ensure a subfolder exists and return its id."""
-    q = f"mimeType = 'application/vnd.google-apps.folder' and name = '{name.replace(\"'\",\"\\'\")}' and '{parent_id}' in parents and trashed = false"
+    # Escape single quotes for Drive query
+    safe_name = name.replace("'", "\\'")
+    q = (
+        "mimeType = 'application/vnd.google-apps.folder' "
+        f"and name = '{safe_name}' "
+        f"and '{parent_id}' in parents and trashed = false"
+    )
     resp = drive.files().list(q=q, fields="files(id,name)").execute()
     files = resp.get("files", [])
     if files:
