@@ -14,6 +14,14 @@ DEBUG = True
 if "--nodebug" in sys.argv:
     DEBUG = False
 
+def resolve_label_id(gmail, label_name: str) -> str:
+    """Return Gmail labelId for a visible label name."""
+    labs = gmail.users().labels().list(userId="me").execute().get("labels", [])
+    for lab in labs:
+        if lab.get("name") == label_name:
+            return lab["id"]
+    raise ValueError(f"Label '{label_name}' not found.")
+
 # ---- deps ----
 try:
     import pdfplumber
@@ -64,7 +72,7 @@ def list_rr_messages(gmail):
     msgs = []
     req = gmail.users().messages().list(
         userId="me",
-        labelIds=["Label_2658737210853877023"],   # <-- replace with your real RR label ID
+        labelIds=[resolve_label_id(gmail, "PUMA - RR")]
         q="is:unread has:attachment",
         maxResults=50
     )
