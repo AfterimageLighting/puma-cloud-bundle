@@ -5,12 +5,21 @@ import os, re, io, sys, base64, datetime
 from typing import List, Tuple, Dict
 
 SPREADSHEET_ID = '1pwVlYSGVjyTCLt4GT7xU2TCnxfdJuxAbp_jU6Snisls'
+
+def resolve_label_id(gmail, label_name: str) -> str:
+    """Return Gmail labelId for a visible label name."""
+    labs = gmail.users().labels().list(userId="me").execute().get("labels", [])
+    for lab in labs:
+        if lab.get("name") == label_name:
+            return lab["id"]
+    raise ValueError(f"Label '{label_name}' not found.")
+
 def list_dr_messages(gmail):
     """Return a list of Gmail message IDs for unread Delivery Reports under PUMA - DR."""
     messages = []
     request = gmail.users().messages().list(
         userId="me",
-        labelIds=["Label_5049817258591074090"],           # <-- put the actual PUMA - DR label ID here
+        labelIds=[resolve_label_id(gmail, "PUMA - DR")],
         q="is:unread has:attachment",            # keep it unread + attachment
         maxResults=50
     )
