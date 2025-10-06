@@ -35,7 +35,7 @@ TAB_MATCHED = "PO Matched"      # where parsed line-items get written (adjust to
 TAB_UNMATCHED = "PO Unmatched"  # where non-PDF/failed parses are logged
 MAKE_LINK_PUBLIC = False        # Set True only if your Drive policy allows link-sharing
 PROJECTS_FOLDER_ID = os.getenv("PUMA_PO_DRIVE_FOLDER_ID", "1VlCypDA_iF5dEUmA9c3E7ABYyS4-m6W2")  # parent folder for uploads
-GMAIL_LABEL_VISIBLE_NAME = "PUMA – PO"  # exact visible name in Gmail (watch the dash and spaces)
+GMAIL_LABEL_VISIBLE_NAME = "PUMA - PO"  # exact visible name in Gmail (watch the dash and spaces)
 
 # Toggle runtime logging
 DEBUG = True
