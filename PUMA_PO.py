@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-PUMA_PO — unified (runner + logic) 2025-10-06
+PUMA_PO — unified (runner + logic)
+User OAuth first (token.json or GMAIL_* env vars), no ADC fallback
 """
 
 import argparse
@@ -13,7 +14,7 @@ import re
 import sys
 from typing import List, Tuple, Dict, Any, Optional
 
-# Optional pdf text layer extraction
+# Optional PDF text extraction
 try:
     import pdfplumber
 except Exception:
@@ -22,19 +23,19 @@ except Exception:
 # Google APIs
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
-from google.oauth2.credentials import Credentials as UserCreds
-import google.auth
+from google.oauth2.credentials import Credentials
 
-# ------------------------- CONFIG ------------------------- #
+# -------------------------------------------------------------------
+# CONFIG
+# -------------------------------------------------------------------
 
 SPREADSHEET_ID = os.getenv("PUMA_SPREADSHEET_ID", "").strip()
 PROJECTS_FOLDER_ID = os.getenv("PUMA_PO_DRIVE_FOLDER_ID", "").strip()
-DEFAULT_LABEL_VISIBLE_NAME = "PUMA - PO"  # use ASCII '-'
+DEFAULT_LABEL_VISIBLE_NAME = "PUMA - PO"
 
 TAB_MATCHED = "PO Matched"
 TAB_UNMATCHED = "PO Unmatched"
-MAKE_LINK_PUBLIC = False  # set True only if policy allows
-
+MAKE_LINK_PUBLIC = False
 DEBUG = True
 
 SCOPES = [
@@ -44,38 +45,77 @@ SCOPES = [
 ]
 TOKEN_URI = "https://oauth2.googleapis.com/token"
 
-# ------------------------- UTIL / AUTH ------------------------- #
+# -------------------------------------------------------------------
+# UTILS
+# -------------------------------------------------------------------
 
 def dprint(*a, **k):
     if DEBUG:
         print(*a, **k)
 
-def build_user_credentials(scopes):
+# -------------------------------------------------------------------
+# AUTH
+# -------------------------------------------------------------------
+
+def _creds_from_token_file() -> Optional[Credentials]:
+    path = "/app/token.json"
+    if os.path.exists(path):
+        try:
+            return Credentials.from_authorized_user_file(path, SCOPES)
+        except Exception as e:
+            print("[PO] WARNING: failed to read token.json:", repr(e))
+    return None
+
+
+def _creds_from_env() -> Optional[Credentials]:
     cid = os.getenv("GMAIL_CLIENT_ID", "").strip()
     cs = os.getenv("GMAIL_CLIENT_SECRET", "").strip()
     rt = os.getenv("GMAIL_REFRESH_TOKEN", "").strip()
-    if not (cid and cs and rt):
-        return None
-    return UserCreds(
-        None,
-        refresh_token=rt,
-        client_id=cid,
-        client_secret=cs,
-        token_uri=TOKEN_URI,
-        scopes=scopes,
-    )
+    if cid and cs and rt:
+        return Credentials(
+            None,
+            refresh_token=rt,
+            client_id=cid,
+            client_secret=cs,
+            token_uri=TOKEN_URI,
+            scopes=SCOPES,
+        )
+    return None
+
 
 def get_services():
-    # Prefer user OAuth (mailbox/Drive of human). Fallback to ADC for local/dev.
-    creds = build_user_credentials(SCOPES)
+    # 1) Prefer token.json written by entrypoint
+    creds = _creds_from_token_file()
+    source = "token.json"
+
+    # 2) Fallback to GMAIL_* environment vars
     if creds is None:
-        creds, _ = google.auth.default(scopes=SCOPES)
+        creds = _creds_from_env()
+        source = "env"
+
+    # 3) Hard-fail if no valid user OAuth creds (no ADC)
+    if creds is None:
+        raise RuntimeError(
+            "[PO] No user OAuth credentials. Provide /app/token.json OR "
+            "GMAIL_CLIENT_ID / GMAIL_CLIENT_SECRET / GMAIL_REFRESH_TOKEN."
+        )
+
     gmail = build("gmail", "v1", credentials=creds, cache_discovery=False)
     drive = build("drive", "v3", credentials=creds, cache_discovery=False)
     sheets = build("sheets", "v4", credentials=creds, cache_discovery=False)
+
+    # Show which mailbox we're actually using
+    try:
+        profile = gmail.users().getProfile(userId="me").execute()
+        print(f"[PO] Auth source: {source} | Gmail profile:", profile.get("emailAddress"))
+    except Exception as e:
+        print("[PO] WARNING: could not read Gmail profile:", repr(e))
+
     return gmail, drive, sheets
 
-# ------------------------- GMAIL HELPERS ------------------------- #
+# -------------------------------------------------------------------
+# GMAIL HELPERS
+# -------------------------------------------------------------------
 
 _dash_re = re.compile(r"[–—−-]")
 
@@ -84,20 +124,24 @@ def _norm_label(s: str) -> str:
     s = re.sub(r"\s+", " ", s).strip().lower()
     return s
 
+
 def resolve_label_id(gmail, label_name: str) -> str:
     want = _norm_label(label_name)
     labs = gmail.users().labels().list(userId="me").execute().get("labels", [])
-    # exact normalized match
+    # exact match
     for lab in labs:
         if _norm_label(lab.get("name", "")) == want:
             return lab["id"]
-    # soft fallback: contains both tokens
+    # fallback partial
     for lab in labs:
         nm = _norm_label(lab.get("name", ""))
         if "puma" in nm and "po" in nm:
             return lab["id"]
-    dprint("[PO] Available labels:", [lab.get("name", "") for lab in labs])
+    print("[PO] Available labels (normalized → original):",
+          [(_norm_label(lab.get("name","")), lab.get("name","")) for lab in labs])
+    print("[PO] Wanted (normalized):", want)
     raise ValueError(f"Label not found for '{label_name}' (normalized='{want}')")
+
 
 def list_po_messages(gmail, include_read=False, days_back=None, label_name=DEFAULT_LABEL_VISIBLE_NAME, max_results=100):
     label_id = resolve_label_id(gmail, label_name)
@@ -121,8 +165,10 @@ def list_po_messages(gmail, include_read=False, days_back=None, label_name=DEFAU
     dprint(f"[PO] Found {len(messages)} message(s).")
     return messages
 
+
 def get_message(gmail, msg_id: str) -> Dict[str, Any]:
     return gmail.users().messages().get(userId="me", id=msg_id, format="full").execute()
+
 
 def iter_attachments(gmail, msg: Dict[str, Any]) -> List[Tuple[str, bytes, str]]:
     out = []
@@ -144,6 +190,7 @@ def iter_attachments(gmail, msg: Dict[str, Any]) -> List[Tuple[str, bytes, str]]
             out.append((filename, data, mime))
     return out
 
+
 def msg_subject(msg: Dict[str, Any]) -> str:
     headers = msg.get("payload", {}).get("headers", [])
     for h in headers:
@@ -151,10 +198,11 @@ def msg_subject(msg: Dict[str, Any]) -> str:
             return h.get("value", "")
     return ""
 
-# ------------------------- DRIVE HELPERS ------------------------- #
+# -------------------------------------------------------------------
+# DRIVE & SHEETS HELPERS
+# -------------------------------------------------------------------
 
 def _ensure_subfolder(drive, parent_id: str, name: str) -> str:
-    """Ensure a subfolder exists and return its id."""
     safe_name = name.replace("'", "\\'")
     q = (
         "mimeType = 'application/vnd.google-apps.folder' "
@@ -165,19 +213,17 @@ def _ensure_subfolder(drive, parent_id: str, name: str) -> str:
     files = resp.get("files", [])
     if files:
         return files[0]["id"]
-    meta = {
-        "name": name,
-        "mimeType": "application/vnd.google-apps.folder",
-        "parents": [parent_id],
-    }
+    meta = {"name": name, "mimeType": "application/vnd.google-apps.folder", "parents": [parent_id]}
     folder = drive.files().create(body=meta, fields="id").execute()
     return folder["id"]
+
 
 def upload_blob_to_drive(drive, folder_id: str, name: str, data: bytes, mimetype: str):
     media = MediaIoBaseUpload(io.BytesIO(data), mimetype=mimetype, resumable=False)
     meta = {"name": name, "parents": [folder_id]}
     file = drive.files().create(body=meta, media_body=media, fields="id, webViewLink").execute()
     return file["id"], file.get("webViewLink", "")
+
 
 def maybe_make_public(drive, file_id: str, should_share: bool):
     if not should_share:
@@ -188,7 +234,6 @@ def maybe_make_public(drive, file_id: str, should_share: bool):
     except Exception as e:
         dprint(f"[Drive] Public sharing failed: {e}")
 
-# ------------------------- SHEETS HELPERS ------------------------- #
 
 def append_rows(sheets, tab: str, values: List[List[Any]]):
     if not values:
@@ -202,7 +247,9 @@ def append_rows(sheets, tab: str, values: List[List[Any]]):
         body=body
     ).execute()
 
-# ------------------------- PARSER ------------------------- #
+# -------------------------------------------------------------------
+# PDF PARSER
+# -------------------------------------------------------------------
 
 def parse_po_pdf_with_tracker(pdf_bytes: bytes, cpn_list=None) -> Dict[str, Any]:
     text = ""
@@ -210,8 +257,7 @@ def parse_po_pdf_with_tracker(pdf_bytes: bytes, cpn_list=None) -> Dict[str, Any]
         try:
             with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
                 for page in pdf.pages:
-                    t = page.extract_text() or ""
-                    text += "\n" + t
+                    text += "\n" + (page.extract_text() or "")
         except Exception as e:
             dprint(f"[PDF] pdfplumber failed: {e}")
     if not text:
@@ -236,14 +282,14 @@ def parse_po_pdf_with_tracker(pdf_bytes: bytes, cpn_list=None) -> Dict[str, Any]
             items.append({"sku": m.group(1), "qty": int(m.group(3))})
     return {"po_number": po_number, "items": items}
 
-# ------------------------- FLOW ------------------------- #
-
-def _ln(x): 
-    return (str(x or "")).strip().lower()
+# -------------------------------------------------------------------
+# MAIN FLOW
+# -------------------------------------------------------------------
 
 def fallback_po_from_filename(fname: str) -> Optional[str]:
     m = re.search(r"(?:PO[-_ ]?)?(\d{3,8})(?=\.pdf$|[^0-9])", fname, re.I)
     return f"PO-{m.group(1)}" if m else None
+
 
 def process_message(gmail, drive, sheets, msg, project_root_folder_id: str=PROJECTS_FOLDER_ID, make_link_public: bool=MAKE_LINK_PUBLIC):
     subject = msg_subject(msg)
@@ -253,83 +299,97 @@ def process_message(gmail, drive, sheets, msg, project_root_folder_id: str=PROJE
     attachments = iter_attachments(gmail, msg)
     dprint(f"[PO] {msg_id} — '{subject}' — {len(attachments)} attachment(s)")
 
-    unmatched_rows = []
-    matched_rows = []  # shape this to your "PO Matched" tab layout
-
+    unmatched_rows, matched_rows = [], []
     project_name = (subject or "PO")[:80]
     project_folder_id = _ensure_subfolder(drive, project_root_folder_id, project_name)
-
-    any_file_link = ""
-    po_number_global = None
 
     for fname, data, mime in attachments:
         lower = (fname or "").lower()
 
-        # Non-PDF: log as unmatched and (optionally) upload for record
         if not lower.endswith(".pdf"):
             file_id, link = upload_blob_to_drive(drive, project_folder_id, fname, data, mime or "application/octet-stream")
             maybe_make_public(drive, file_id, make_link_public)
-            any_file_link = any_file_link or link
             unmatched_rows.append([when, project_name, subject, "", fname, "", "Non-PDF attachment; skipped parse"])
             continue
 
-        # It's a PDF: upload first (so we always retain the doc), then parse
         file_id, link = upload_blob_to_drive(drive, project_folder_id, fname, data, "application/pdf")
         maybe_make_public(drive, file_id, make_link_public)
-        any_file_link = any_file_link or link
 
-        parsed = parse_po_pdf_with_tracker(data, cpn_list=None)
+        parsed = parse_po_pdf_with_tracker(data)
         po_number = parsed.get("po_number") or fallback_po_from_filename(fname)
-        po_number_global = po_number_global or po_number
-
         items = parsed.get("items", [])
+
         if not items:
             unmatched_rows.append([when, project_name, subject, po_number or "", fname, link, "PDF parsed but no items found"])
         else:
             for it in items:
                 matched_rows.append([when, project_name, po_number or "", it.get("sku",""), it.get("qty",""), link, subject])
 
-    # Write rows
     if unmatched_rows:
         append_rows(sheets, TAB_UNMATCHED, unmatched_rows)
     if matched_rows:
         append_rows(sheets, TAB_MATCHED, matched_rows)
 
-def run(include_read: bool=False, days_back: Optional[int]=None, label: Optional[str]=None):
-    # env sanity
+# -------------------------------------------------------------------
+# RUN / CLI
+# -------------------------------------------------------------------
+
+def run(include_read=False, days_back=None, label=None):
     missing = []
     if not SPREADSHEET_ID: missing.append("PUMA_SPREADSHEET_ID")
     if not PROJECTS_FOLDER_ID: missing.append("PUMA_PO_DRIVE_FOLDER_ID")
     if missing:
-        print(f"[PO] ERROR: Missing required env var(s): {', '.join(missing)}", file=sys.stderr)
+        print(f"[PO] ERROR: Missing env var(s): {', '.join(missing)}", file=sys.stderr)
         return 2
 
     gmail, drive, sheets = get_services()
     label_name = label or DEFAULT_LABEL_VISIBLE_NAME
     dprint(f"[PO] Starting run | include_read={include_read} | days_back={days_back} | label='{label_name}'")
-    msgs = list_po_messages(gmail, include_read=include_read, days_back=days_back, label_name=label_name)
+
+    try:
+        msgs = list_po_messages(gmail, include_read=include_read, days_back=days_back, label_name=label_name)
+    except Exception as e:
+        import traceback
+        print("[PO] ERROR during list_po_messages() with label:", label_name)
+        traceback.print_exc()
+        return 1
+
     for m in msgs:
-        msg = get_message(gmail, m["id"])
-        process_message(gmail, drive, sheets, msg)
+        try:
+            msg = get_message(gmail, m["id"])
+            process_message(gmail, drive, sheets, msg)
+        except Exception:
+            import traceback
+            print("[PO] ERROR processing message id:", m.get("id"))
+            traceback.print_exc()
+            continue
+
     dprint("[PO] Completed OK")
     return 0
 
-# ------------------------- CLI ------------------------- #
 
 def main(argv=None):
     global DEBUG
     p = argparse.ArgumentParser()
-    p.add_argument("--include-read", action="store_true", help="Include read emails (backfill mode)")
-    p.add_argument("--days-back", type=int, default=None, help="Only fetch emails newer than N days")
-    p.add_argument("--label", type=str, default=None, help="Override label name (default 'PUMA - PO')")
-    p.add_argument("--debug", action="store_true", help="Enable verbose logging")
-    p.add_argument("--nodebug", action="store_true", help="Disable verbose logging")
+    p.add_argument("--include-read", action="store_true")
+    p.add_argument("--days-back", type=int, default=None)
+    p.add_argument("--label", type=str, default=None)
+    p.add_argument("--debug", action="store_true")
+    p.add_argument("--nodebug", action="store_true")
     args = p.parse_args(argv)
-
-    if args.debug: DEBUG = True
-    if args.nodebug: DEBUG = False
-
+    if args.debug:
+        DEBUG = True
+    if args.nodebug:
+        DEBUG = False
     return run(include_read=args.include_read, days_back=args.days_back, label=args.label)
 
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        rc = main()
+    except Exception as e:
+        import traceback
+        print("[PO] FATAL:", repr(e))
+        traceback.print_exc()
+        rc = 1
+    raise SystemExit(rc)
