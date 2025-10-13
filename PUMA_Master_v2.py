@@ -9,7 +9,13 @@ STEPS = [
     ("OKD",   "PUMA_OKD.py",  []),
     ("RFA",   "PUMA_RFA.py",   []),
     ("RFPO",  "PUMA_RFPO.py",  []),
-    ("PO",    "PUMA_PO.py",   []),
+    ("PO",    "PUMA_PO.py",   [
+        "--label", "PUMA/PUMA - PO",
+        "--only-unread",
+        "--require-subject-po",
+        "--exclude-rfpo",
+        "--mark-read",
+    ]),
     ("RR",    "PUMA_RR.py",    []),
     ("RFPS",  "PUMA_RFPS.py",  []),
     ("DR",    "PUMA_DR.py",    []),
@@ -26,6 +32,15 @@ def _now_ts():
     return datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
 def bootstrap_auth():
+    # ⬇️ ADD THIS GUARD (first lines of the function)
+    if (
+        os.getenv("GMAIL_CLIENT_ID")
+        and os.getenv("GMAIL_CLIENT_SECRET")
+        and os.getenv("GMAIL_REFRESH_TOKEN")
+    ):
+        print("[AUTH] ENV credentials detected; skipping token.json bootstrap.")
+        return
+
     try:
         from google.oauth2.credentials import Credentials
         from google_auth_oauthlib.flow import InstalledAppFlow
