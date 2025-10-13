@@ -187,23 +187,33 @@ def msg_subject(msg: Dict[str, Any]) -> str:
 # ------------------------- DRIVE HELPERS ------------------------- #
 
 def _ensure_subfolder(drive, parent_id: str, name: str) -> str:
-    """Ensure a subfolder exists and return its id."""
     safe_name = name.replace("'", "\\'")
     q = (
         "mimeType = 'application/vnd.google-apps.folder' "
         f"and name = '{safe_name}' "
         f"and '{parent_id}' in parents and trashed = false"
     )
-    resp = drive.files().list(q=q, fields="files(id,name)").execute()
+    resp = drive.files().list(
+        q=q,
+        fields="files(id,name,parents,driveId)",
+        includeItemsFromAllDrives=True,
+        supportsAllDrives=True,
+        corpora="allDrives"
+    ).execute()
     files = resp.get("files", [])
     if files:
         return files[0]["id"]
+
     meta = {
         "name": name,
         "mimeType": "application/vnd.google-apps.folder",
         "parents": [parent_id],
     }
-    folder = drive.files().create(body=meta, fields="id").execute()
+    folder = drive.files().create(
+        body=meta,
+        fields="id",
+        supportsAllDrives=True
+    ).execute()
     return folder["id"]
 
 def upload_blob_to_drive(drive, folder_id: str, name: str, data: bytes, mimetype: str):
