@@ -306,8 +306,8 @@ def process_thread(gmail, drive, sheets, thread: Dict[str,Any],
             maybe_make_public(drive, file_id, make_public)
 
             items = parsed.get("items", [])
+            any_pdf_success=True   # mark the thread “handled” if we saved at least one PDF
             if items:
-                any_pdf_success=True
                 for it in items:
                     matched_rows.append([when, project_name, po_num, it.get("sku",""), it.get("qty",""), link, subject])
             else:
