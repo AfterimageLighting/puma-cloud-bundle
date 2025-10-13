@@ -1,17 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""
-PUMA_PO — thread-aware PO ingest
-- Strict label resolver
-- Searches by THREADS so replies/unread don’t hide earlier PDFs
-- Subject gates (--require-subject-po, --exclude-rfpo)
-- Optional attachment gates (--no-attachment-filter, --no-pdf-filter)
-- Shared Drive–safe (supportsAllDrives/corpora=allDrives)
-- Drive subfolder per thread subject; uploads PDFs and parses basic PO info
-- Matched/unmatched rows appended to Sheets
-"""
-
 import argparse, base64, datetime as _dt, io, os, re, sys
 from typing import List, Tuple, Dict, Any, Optional
 
@@ -24,16 +13,17 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
 from google.oauth2.credentials import Credentials
 
-# ====== CONFIG VIA ENV ======
+# ========= ENV =========
 SPREADSHEET_ID = os.getenv("PUMA_SPREADSHEET_ID", "").strip()
 PROJECTS_FOLDER_ID = os.getenv("PUMA_PO_DRIVE_FOLDER_ID", "").strip()
 DEFAULT_LABEL_VISIBLE_NAME = "PUMA - PO"
-TAB_MATCHED = "PO Matched"
+
+TAB_MATCHED   = "PO Matched"
 TAB_UNMATCHED = "PO Unmatched"
 MAKE_LINK_PUBLIC = False
 
 SCOPES = [
-    "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/gmail.modify",   # allow mark-as-read when requested
     "https://www.googleapis.com/auth/drive",
     "https://www.googleapis.com/auth/spreadsheets",
 ]
@@ -41,10 +31,9 @@ TOKEN_URI = "https://oauth2.googleapis.com/token"
 
 DEBUG = True
 def dprint(*a, **k):
-    if DEBUG:
-        print(*a, **k)
+    if DEBUG: print(*a, **k)
 
-# ====== AUTH ======
+# ========= AUTH =========
 def _creds_from_token_file() -> Optional[Credentials]:
     p = "/app/token.json"
     if os.path.exists(p):
@@ -70,37 +59,61 @@ def get_services():
     if creds is None:
         creds = _creds_from_env(); source = "env"
     if creds is None:
-        raise RuntimeError("[PO] No Gmail OAuth available (token.json or env refresh token).")
+        raise RuntimeError("[PO] No Gmail OAuth available.")
     gmail  = build("gmail","v1", credentials=creds, cache_discovery=False)
     drive  = build("drive","v3", credentials=creds, cache_discovery=False)
     sheets = build("sheets","v4", credentials=creds, cache_discovery=False)
     try:
-        profile = gmail.users().getProfile(userId="me").execute()
-        print(f"[PO] Auth source: {source} | Gmail profile:", profile.get("emailAddress"))
+        prof = gmail.users().getProfile(userId="me").execute()
+        print(f"[PO] Auth source: {source} | Gmail profile:", prof.get("emailAddress"))
     except Exception as e:
         print("[PO] WARNING: could not read Gmail profile:", repr(e))
     return gmail, drive, sheets
 
-# ====== HELPERS ======
-_dash_re = re.compile(r"[–—−-]")
-def _norm_label(s:str)->str:
-    s = _dash_re.sub("-", s)
+# ========= LABEL RESOLUTION =========
+_dash = re.compile(r"[–—−-]")  # normalize dash-y chars
+def _norm(s: str) -> str:
+    s = _dash.sub("-", s)
     s = re.sub(r"\s+", " ", s).strip().lower()
     return s
 
 def resolve_label_id(gmail, label_name: str) -> Tuple[str, str]:
-    want = _norm_label(label_name)
+    """Resolve label by exact, parent/child, and normalized child-name match."""
+    want_raw = label_name.strip()
+    want_norm = _norm(want_raw)
+
     labs = gmail.users().labels().list(userId="me").execute().get("labels", [])
-    for lab in labs:
-        nm = lab.get("name","")
-        if _norm_label(nm) == want:
-            return lab["id"], nm
-    print("[PO] Available labels:", [l.get("name","") for l in labs])
+    names = [l.get("name","") for l in labs]
+
+    # 1) exact
+    for l in labs:
+        if l.get("name","") == want_raw:
+            return l["id"], l["name"]
+
+    # 2) try parent/child if user passed "PUMA - X" and parent exists "PUMA"
+    if " - " in want_raw and not ("/" in want_raw):
+        parent, child = "PUMA", want_raw
+        candidate = f"{parent}/{child}"
+        for l in labs:
+            if l.get("name","") == candidate:
+                return l["id"], l["name"]
+
+    # 3) normalized unique match (child portion)
+    matches = []
+    for l in labs:
+        nm = l.get("name","")
+        child = nm.split("/",1)[-1]
+        if _norm(child) == want_norm:
+            matches.append(l)
+    if len(matches) == 1:
+        return matches[0]["id"], matches[0]["name"]
+
+    print("[PO] Available labels:", names)
     raise ValueError(f"Label not found for '{label_name}'")
 
+# ========= GMAIL HELPERS =========
 def msg_subject(msg: Dict[str,Any]) -> str:
-    headers = msg.get("payload", {}).get("headers", [])
-    for h in headers:
+    for h in msg.get("payload",{}).get("headers",[]):
         if h.get("name","").lower() == "subject":
             return h.get("value","")
     return ""
@@ -110,7 +123,6 @@ def iter_message_attachments(gmail, msg: Dict[str,Any]) -> List[Tuple[str, bytes
     payload = msg.get("payload",{}) or {}
     parts = payload.get("parts",[]) or []
     stack = parts[:]
-    # also consider single-part messages
     if payload.get("filename"):
         stack.append(payload)
     while stack:
@@ -122,7 +134,7 @@ def iter_message_attachments(gmail, msg: Dict[str,Any]) -> List[Tuple[str, bytes
         mime  = part.get("mimeType","")
         body  = part.get("body",{}) or {}
         data_b64 = body.get("data")
-        att_id = body.get("attachmentId")
+        att_id   = body.get("attachmentId")
         if not fname:
             continue
         if att_id:
@@ -138,35 +150,26 @@ def iter_message_attachments(gmail, msg: Dict[str,Any]) -> List[Tuple[str, bytes
             out.append((fname, data, mime))
     return out
 
-# ====== DRIVE ======
+# ========= DRIVE =========
 def _ensure_subfolder(drive, parent_id: str, name: str) -> str:
-    safe_name = name.replace("'", "\\'")
-    q = (
-        "mimeType = 'application/vnd.google-apps.folder' "
-        f"and name = '{safe_name}' and '{parent_id}' in parents and trashed = false"
-    )
+    safe = name.replace("'", "\\'")
+    q = ("mimeType = 'application/vnd.google-apps.folder' "
+         f"and name = '{safe}' and '{parent_id}' in parents and trashed = false")
     resp = drive.files().list(
         q=q, fields="files(id,name)",
         includeItemsFromAllDrives=True, supportsAllDrives=True, corpora="allDrives"
     ).execute()
     files = resp.get("files", [])
-    if files:
-        return files[0]["id"]
-    meta = {
-        "name": name, "mimeType": "application/vnd.google-apps.folder",
-        "parents": [parent_id],
-    }
-    folder = drive.files().create(
-        body=meta, fields="id", supportsAllDrives=True
-    ).execute()
+    if files: return files[0]["id"]
+    meta = {"name": name, "mimeType": "application/vnd.google-apps.folder", "parents":[parent_id]}
+    folder = drive.files().create(body=meta, fields="id", supportsAllDrives=True).execute()
     return folder["id"]
 
 def upload_blob_to_drive(drive, folder_id: str, name: str, data: bytes, mimetype: str):
     media = MediaIoBaseUpload(io.BytesIO(data), mimetype=mimetype, resumable=False)
-    meta = {"name": name, "parents": [folder_id]}
-    file = drive.files().create(
-        body=meta, media_body=media, fields="id, webViewLink",
-        supportsAllDrives=True
+    meta  = {"name": name, "parents":[folder_id]}
+    file  = drive.files().create(
+        body=meta, media_body=media, fields="id, webViewLink", supportsAllDrives=True
     ).execute()
     return file["id"], file.get("webViewLink","")
 
@@ -180,17 +183,24 @@ def maybe_make_public(drive, file_id: str, share: bool):
     except Exception as e:
         dprint("[Drive] Public share failed:", e)
 
-# ====== SHEETS ======
+# ========= SHEETS =========
 def append_rows(sheets, tab: str, values: List[List[Any]]):
     if not values: return
-    rng = f"{tab}!A2"
-    body = {"values": values}
     sheets.spreadsheets().values().append(
-        spreadsheetId=SPREADSHEET_ID, range=rng,
-        valueInputOption="USER_ENTERED", body=body
+        spreadsheetId=SPREADSHEET_ID, range=f"{tab}!A2",
+        valueInputOption="USER_ENTERED", body={"values": values}
     ).execute()
 
-# ====== PDF PARSER ======
+# ========= PARSING =========
+SUBJ_RE = re.compile(r"purchase\s*order\s*\(\s*(po-?[0-9A-Z\-]+)\s*\)\s*[-–—]\s*(.+)", re.I)
+
+def project_from_subject(subject: str) -> str:
+    m = SUBJ_RE.search(subject or "")
+    if m: return m.group(2).strip()
+    if " - " in subject:
+        return subject.split(" - ",1)[1].strip()
+    return (subject or "PO")[:80]
+
 def parse_po_pdf(pdf_bytes: bytes) -> Dict[str,Any]:
     text=""
     if pdfplumber is not None:
@@ -200,15 +210,14 @@ def parse_po_pdf(pdf_bytes: bytes) -> Dict[str,Any]:
                     text += "\n" + (p.extract_text() or "")
         except Exception as e:
             dprint("[PDF] pdfplumber failed:", e)
-    if not text:
-        return {"po_number": None, "items": []}
+    if not text: return {"po_number": None, "items": []}
 
-    po_number=None
+    po=None
     for pat in [r"\bPO(?:\s*#|[:\- ])\s*([A-Z0-9\-]{3,})\b",
                 r"\bPurchase\s*Order(?:\s*#|[:\- ])\s*([A-Z0-9\-]{3,})\b",
                 r"\bP\.?O\.?\s*([A-Z0-9\-]{3,})\b"]:
         m=re.search(pat, text, re.I)
-        if m: po_number=m.group(1); break
+        if m: po=m.group(1); break
 
     items=[]
     for line in text.splitlines():
@@ -216,21 +225,28 @@ def parse_po_pdf(pdf_bytes: bytes) -> Dict[str,Any]:
         m=re.search(r"([A-Z0-9\-\._]{3,})\s+.*?\b(qty|quantity)\b[:\s]*([0-9]+)\b", line, re.I)
         if m:
             items.append({"sku": m.group(1), "qty": int(m.group(3))})
-    return {"po_number": po_number, "items": items}
+    return {"po_number": po, "items": items}
 
 def fallback_po_from_filename(fname:str)->Optional[str]:
-    m=re.search(r"(?:PO[-_ ]?)?(\d{3,10})(?=\.pdf$|[^0-9])", fname, re.I)
+    m=re.search(r"(?:PO[-_ ]?)?([0-9]{3,10})(?=\.pdf$|[^0-9])", fname, re.I)
     return f"PO-{m.group(1)}" if m else None
 
-# ====== GMAIL (THREAD-AWARE) ======
+def normalize_po_number(po: Optional[str], fname: str) -> Optional[str]:
+    po = po or fallback_po_from_filename(fname)
+    if not po: return None
+    po = po.upper().replace(" ", "")
+    if not po.startswith("PO"): po = "PO-"+po
+    po = po.replace("PO", "PO-").replace("PO--", "PO-")
+    po = re.sub(r"PO-+", "PO-", po)
+    return po
+
+# ========= QUERY / THREADS =========
 def build_query(only_unread: bool, days_back: Optional[int],
                 drop_attachment_filter: bool, drop_pdf_filter: bool,
                 require_subject_po: bool, exclude_rfpo: bool) -> Optional[str]:
     terms=[]
-    if only_unread:
-        terms.append("is:unread")
-    if days_back:
-        terms.append(f"newer_than:{int(days_back)}d")
+    if only_unread: terms.append("is:unread")
+    if days_back:   terms.append(f"newer_than:{int(days_back)}d")
     if not drop_attachment_filter:
         terms.append("has:attachment")
         if not drop_pdf_filter:
@@ -242,97 +258,86 @@ def build_query(only_unread: bool, days_back: Optional[int],
     return " ".join(terms) if terms else None
 
 def list_threads(gmail, label_id: str, q: Optional[str], max_results: int=500):
-    threads=[]
+    out=[]
     kwargs={"userId":"me","labelIds":[label_id],"maxResults":100}
     if q: kwargs["q"]=q
     req=gmail.users().threads().list(**kwargs)
-    while req is not None and len(threads) < max_results:
+    while req is not None and len(out) < max_results:
         resp=req.execute()
-        threads.extend(resp.get("threads",[]))
+        out.extend(resp.get("threads",[]))
         req=gmail.users().threads().list_next(previous_request=req, previous_response=resp)
-    return threads
+    return out
 
-# ====== MAIN FLOW ======
+# ========= MAIN FLOW =========
 def process_thread(gmail, drive, sheets, thread: Dict[str,Any],
-                   parent_folder_id: str, make_public: bool):
-    # Load full thread
+                   parent_folder_id: str, make_public: bool,
+                   mark_read: bool=False, audit_nonpdf: bool=False):
     t = gmail.users().threads().get(userId="me", id=thread["id"], format="full").execute()
     messages = t.get("messages", [])
-    if not messages:
-        return
+    if not messages: return
 
-    # Choose a stable folder name (first message subject)
     first_subject = msg_subject(messages[0]) or "PO"
+    project_name  = project_from_subject(first_subject)
     when = _dt.datetime.now().isoformat(timespec="seconds")
-    project_folder_id = _ensure_subfolder(drive, parent_folder_id, first_subject[:80])
+    project_folder_id = _ensure_subfolder(drive, parent_folder_id, project_name[:80])
 
-    matched_rows=[]; unmatched_rows=[]
-    seen_files=set()
+    matched_rows, unmatched_rows = [], []
+    seen_pdf_keys=set()
+    any_pdf_success=False
 
     for m in messages:
         subject = msg_subject(m)
-        atts = iter_message_attachments(gmail, m)
-        if not atts:
-            continue
-
-        for fname, data, mime in atts:
-            if (m["id"], fname) in seen_files:
-                continue
-            seen_files.add((m["id"], fname))
-
+        for fname, data, mime in iter_message_attachments(gmail, m):
             is_pdf = (fname or "").lower().endswith(".pdf")
-            mimetype = "application/pdf" if is_pdf else (mime or "application/octet-stream")
-            file_id, link = upload_blob_to_drive(drive, project_folder_id, fname, data, mimetype)
-            maybe_make_public(drive, file_id, make_public)
-
             if not is_pdf:
-                unmatched_rows.append([when, first_subject, subject, "", fname, link, "Non-PDF; skipped parse"])
+                if audit_nonpdf:
+                    unmatched_rows.append([when, project_name, subject, "", fname, "", "Non-PDF; skipped"])
                 continue
+
+            key=(len(data), hash(data[:4096]))
+            if key in seen_pdf_keys: continue
+            seen_pdf_keys.add(key)
 
             parsed = parse_po_pdf(data)
-            po = parsed.get("po_number") or fallback_po_from_filename(fname) or ""
+            po_num = normalize_po_number(parsed.get("po_number"), fname) or "PO-UNKNOWN"
+            save_name = f"{po_num}.pdf"
+
+            file_id, link = upload_blob_to_drive(drive, project_folder_id, save_name, data, "application/pdf")
+            maybe_make_public(drive, file_id, make_public)
+
             items = parsed.get("items", [])
-            if not items:
-                unmatched_rows.append([when, first_subject, subject, po, fname, link, "PDF parsed; no items found"])
-            else:
+            if items:
+                any_pdf_success=True
                 for it in items:
-                    matched_rows.append([when, first_subject, po, it.get("sku",""), it.get("qty",""), link, subject])
+                    matched_rows.append([when, project_name, po_num, it.get("sku",""), it.get("qty",""), link, subject])
+            else:
+                unmatched_rows.append([when, project_name, subject, po_num, save_name, link, "PDF parsed; no items found"])
 
-    if unmatched_rows:
-        append_rows(sheets, TAB_UNMATCHED, unmatched_rows)
-    if matched_rows:
-        append_rows(sheets, TAB_MATCHED, matched_rows)
+    if unmatched_rows: append_rows(sheets, TAB_UNMATCHED, unmatched_rows)
+    if matched_rows:   append_rows(sheets, TAB_MATCHED,   matched_rows)
 
-def run(
-    label_name: str,
-    days_back: Optional[int],
-    only_unread: bool,
-    drop_attachment_filter: bool,
-    drop_pdf_filter: bool,
-    require_subject_po: bool,
-    exclude_rfpo: bool,
-):
-    # sanity
+    if mark_read and any_pdf_success:
+        try:
+            gmail.users().threads().modify(userId="me", id=thread["id"],
+                                           body={"removeLabelIds":["UNREAD"]}).execute()
+        except Exception as e:
+            dprint("[PO] Mark-read failed:", e)
+
+def run(args):
     missing=[]
-    if not SPREADSHEET_ID: missing.append("PUMA_SPREADSHEET_ID")
+    if not SPREADSHEET_ID:   missing.append("PUMA_SPREADSHEET_ID")
     if not PROJECTS_FOLDER_ID: missing.append("PUMA_PO_DRIVE_FOLDER_ID")
     if missing:
-        print("[PO] ERROR: Missing env:", ", ".join(missing), file=sys.stderr); return 2
+        print("[PO] ERROR: Missing env:", ", ".join(missing), file=sys.stderr)
+        return 2
 
     gmail, drive, sheets = get_services()
+    label_id, label_actual = resolve_label_id(gmail, args.label)
+    print(f"[PO] Starting run | label='{label_actual}' | days_back={args.days_back} | only_unread={args.only_unread}")
 
-    # Resolve label
-    label_id, label_actual = resolve_label_id(gmail, label_name)
-    print(f"[PO] Starting run | label='{label_actual}' | days_back={days_back} | only_unread={only_unread}")
-
-    q = build_query(
-        only_unread=only_unread,
-        days_back=days_back,
-        drop_attachment_filter=drop_attachment_filter,
-        drop_pdf_filter=drop_pdf_filter,
-        require_subject_po=require_subject_po,
-        exclude_rfpo=exclude_rfpo,
-    )
+    q = build_query(args.only_unread, args.days_back,
+                    args.no_attachment_filter, args.no_pdf_filter,
+                    args.require_subject_po, args.exclude_rfpo)
     print(f"[PO] Gmail thread search: {q or '(no query)'} | label={label_actual}")
 
     threads = list_threads(gmail, label_id, q)
@@ -340,7 +345,8 @@ def run(
 
     for th in threads:
         try:
-            process_thread(gmail, drive, sheets, th, PROJECTS_FOLDER_ID, MAKE_LINK_PUBLIC)
+            process_thread(gmail, drive, sheets, th, PROJECTS_FOLDER_ID, MAKE_LINK_PUBLIC,
+                           mark_read=args.mark_read, audit_nonpdf=args.audit_nonpdf)
         except Exception as e:
             import traceback
             print("[PO] ERROR processing thread id:", th.get("id"), "|", repr(e))
@@ -355,33 +361,26 @@ def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--label", default=DEFAULT_LABEL_VISIBLE_NAME)
     ap.add_argument("--days-back", type=int, default=None)
-    ap.add_argument("--only-unread", action="store_true",
-                    help="Limit to unread threads (default is all threads matching filters).")
+    ap.add_argument("--only-unread", action="store_true")
     ap.add_argument("--debug", action="store_true")
     ap.add_argument("--nodebug", action="store_true")
-    # filters
     ap.add_argument("--no-attachment-filter", action="store_true",
-                    help="Do not require has:attachment in search (thread parsing still skips non-PDFs).")
+                    help="Do not require has:attachment in search.")
     ap.add_argument("--no-pdf-filter", action="store_true",
                     help="Require has:attachment but allow non-PDFs in search.")
     ap.add_argument("--require-subject-po", action="store_true",
-                    help='Require subject to contain "Purchase Order" or "PO-".')
+                    help='Require subject to contain "purchase order" or "PO-".')
     ap.add_argument("--exclude-rfpo", action="store_true",
                     help="Exclude threads with RFPO in the subject.")
+    ap.add_argument("--mark-read", action="store_true",
+                    help="Remove UNREAD from thread after at least one PDF processed.")
+    ap.add_argument("--audit-nonpdf", action="store_true",
+                    help="Log non-PDF attachments to Unmatched tab (off by default).")
     args = ap.parse_args(argv)
 
     if args.debug: DEBUG=True
     if args.nodebug: DEBUG=False
-
-    return run(
-        label_name=args.label,
-        days_back=args.days_back,
-        only_unread=args.only_unread,
-        drop_attachment_filter=args.no_attachment_filter,
-        drop_pdf_filter=args.no_pdf_filter,
-        require_subject_po=args.require_subject_po,
-        exclude_rfpo=args.exclude_rfpo,
-    )
+    return run(args)
 
 if __name__ == "__main__":
     try:
