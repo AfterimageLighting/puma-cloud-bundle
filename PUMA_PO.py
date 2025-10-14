@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import os, io, argparse, datetime as _dt
+import os, io, re, argparse, logging, datetime as _dt
 from typing import Dict, Any, Iterable, Tuple, List
 
 # ---------- Google API ----------
@@ -29,12 +29,15 @@ DEFAULT_LABEL_VISIBLE_NAME = "PUMA/PUMA - PO"
 TAB_MATCHED   = "PO Matched"
 TAB_UNMATCHED = "PO Unmatched"
 
-# Drive folder + sheet id from env
+# Drive folder + sheet id from env (with sanitizer)
 PROJECTS_FOLDER_ID = os.getenv("PUMA_PO_DRIVE_FOLDER_ID", "")
-SPREADSHEET_ID     = os.getenv("PUMA_SPREADSHEET_ID", "")
+RAW_SPREADSHEET_ID = os.getenv("PUMA_SPREADSHEET_ID", "")
+# Remove any stray angle brackets or whitespace that may have been pasted
+SPREADSHEET_ID     = re.sub(r"[<>\s]", "", RAW_SPREADSHEET_ID)
 MAKE_LINK_PUBLIC   = False
 
 DEBUG = False
+
 def dprint(*a, **k):
     if DEBUG:
         print(*a, **k)
@@ -88,6 +91,22 @@ def get_services() -> Tuple[Any, Any, Any]:
         raise SystemExit(f"[PO] FATAL: could not load credentials ({e})")
 
 
+# ===================== PRE-FLIGHT CHECKS =====================
+
+def assert_sheet_ready(sheets, spreadsheet_id: str, tab_names: List[str]):
+    """Fail fast with clear errors if spreadsheet or tabs are wrong."""
+    try:
+        meta = sheets.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
+        titles = {s.get("properties", {}).get("title") for s in meta.get("sheets", [])}
+        for tab in tab_names:
+            if tab not in titles:
+                raise RuntimeError(f"Tab not found: '{tab}'. Existing tabs: {sorted(titles)}")
+        logging.info(f"[PO] Sheets preflight OK for {spreadsheet_id[-8:]} tabs={tab_names}")
+    except Exception as e:
+        logging.error(f"[PO] Sheets preflight FAILED for {spreadsheet_id[-8:]}: {e}")
+        raise
+
+
 # ===================== GMAIL HELPERS =====================
 
 def resolve_label_id(gmail, label_name: str) -> Tuple[str, str]:
@@ -104,7 +123,7 @@ def resolve_label_id(gmail, label_name: str) -> Tuple[str, str]:
             n = l.get("name", "")
             if n.endswith("/" + label_name) or n == label_name:
                 return l["id"], l["name"]
-    raise ValueError(f"Label not found for '{label_name}'")
+    raise ValueError(f"Label not found for '{label_name}' (have: {names})")
 
 
 def msg_subject(msg: Dict[str, Any]) -> str:
@@ -237,8 +256,8 @@ def parse_po_pdf(data: bytes) -> Dict[str, Any]:
     try:
         with pdfplumber.open(io.BytesIO(data)) as pdf:
             text = "\n".join(page.extract_text() or "" for page in pdf.pages)
-        import re
-        m = re.search(r"\bPO[-\s#]?\s*(\d{3,6})\b", text, flags=re.I)
+        import re as _re
+        m = _re.search(r"\bPO[-\s#]?\s*(\d{3,6})\b", text, flags=_re.I)
         if m:
             out["po_number"] = f"PO-{m.group(1)}"
     except Exception:
@@ -247,10 +266,10 @@ def parse_po_pdf(data: bytes) -> Dict[str, Any]:
 
 
 def normalize_po_number(po: str, fname: str) -> str:
-    import re
+    import re as _re
     if po:
         return po
-    m = re.search(r"\bPO[-_ ]?(\d{3,6})\b", fname, flags=re.I)
+    m = _re.search(r"\bPO[-_ ]?(\d{3,6})\b", fname, flags=_re.I)
     if m:
         return f"PO-{m.group(1)}"
     return None
@@ -305,7 +324,7 @@ def process_thread(gmail, drive, sheets, thread: Dict[str,Any],
             maybe_make_public(drive, file_id, make_public)
 
             items = parsed.get("items", [])
-            # === CHANGE B (already applied): mark thread "handled" if ANY PDF saved ===
+            # === mark thread "handled" if ANY PDF saved ===
             any_pdf_success = True
 
             if items:
@@ -358,6 +377,10 @@ def run(args) -> int:
         raise SystemExit("[PO] FATAL: Missing PUMA_PO_DRIVE_FOLDER_ID or PUMA_SPREADSHEET_ID env")
 
     gmail, drive, sheets = get_services()
+
+    # Preflight the sheet & tabs before doing any work
+    assert_sheet_ready(sheets, SPREADSHEET_ID, [TAB_UNMATCHED, TAB_MATCHED])
+
     try:
         label_id, label_actual = resolve_label_id(gmail, args.label)
     except Exception as e:
@@ -374,6 +397,7 @@ def run(args) -> int:
 
     print(f"[PO] Starting run | label='{label_actual}' | days_back={args.days_back} | only_unread={args.only_unread}")
     print(f"[PO] Gmail thread search: {q or '(no query)'} | label={label_actual}")
+    print(f"[PO] Using spreadsheet ...{SPREADSHEET_ID[-8:]} (sanitized from env)")
 
     res = gmail.users().threads().list(userId="me", q=q, labelIds=[label_id]).execute() or {}
     threads = res.get("threads", []) or []
@@ -418,6 +442,8 @@ def main(argv=None):
 
     if args.debug: DEBUG = True
     if args.nodebug: DEBUG = False
+
+    logging.basicConfig(level=logging.INFO)
 
     try:
         return run(args)
