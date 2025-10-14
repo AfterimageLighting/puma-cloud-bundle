@@ -1,324 +1,403 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+PUMA_RFA.py
+Parse RFA emails and update Project Tracker tabs:
+- Append new items from XLSX/CSV attachments or email body text
+- Detect "swap" requests, mark old PN rows as Omitted and strike through (cols C-E)
+
+Author: PUMA
+"""
+
 import os
 import io
+import re
+import sys
 import base64
-import pandas as pd
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
+import urllib.parse
+from datetime import datetime
+
+# Third-party
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
-from openpyxl import load_workbook
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
+from google.auth.transport.requests import Request
 
-# ============================ Config ============================
-SPREADSHEET_ID = '1pwVlYSGVjyTCLt4GT7xU2TCnxfdJuxAbp_jU6Snisls'
+# Optional helpers
+import csv
+import pandas as pd  # for xlsx (openpyxl engine)
+
+# ---------------------------------------------------------------------------
+# CONFIG
+# ---------------------------------------------------------------------------
+
 SCOPES = [
-    'https://www.googleapis.com/auth/gmail.readonly',
-    'https://www.googleapis.com/auth/gmail.modify',
-    'https://www.googleapis.com/auth/spreadsheets'
+    "https://www.googleapis.com/auth/gmail.modify",
+    "https://www.googleapis.com/auth/spreadsheets"
 ]
-DEBUG = True  # set False to quiet debug prints
 
-# ====================== Auth / Services ========================
-def setup_services():
+SPREADSHEET_ID = os.getenv("PUMA_SPREADSHEET_ID", "").strip()
+if not SPREADSHEET_ID:
+    print("ERROR: PUMA_SPREADSHEET_ID is not set.")
+    sys.exit(1)
+
+RFA_LABEL_NAME = os.getenv("PUMA_RFA_LABEL_NAME", "PUMA - RFA")
+DEBUG = os.getenv("DEBUG", "0") == "1"
+
+# ---------------------------------------------------------------------------
+# AUTH
+# ---------------------------------------------------------------------------
+
+def _load_creds(token_file="token.json", client_secret="credentials.json"):
     creds = None
-    if os.path.exists('token.json'):
-        creds = Credentials.from_authorized_user_file('token.json', SCOPES)
+    if os.path.exists(token_file):
+        creds = Credentials.from_authorized_user_file(token_file, SCOPES)
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
+            if DEBUG: print("Refreshing credentials…")
             creds.refresh(Request())
         else:
-            if not os.path.exists('client_secrets.json'):
-                print("Error: 'client_secrets.json' not found.")
-                return None, None
-            flow = InstalledAppFlow.from_client_secrets_file('client_secrets.json', SCOPES)
+            flow = InstalledAppFlow.from_client_secrets_file(client_secret, SCOPES)
             creds = flow.run_local_server(port=0)
-        with open('token.json', 'w') as token:
+        with open(token_file, "w") as token:
             token.write(creds.to_json())
-    try:
-        return build('gmail', 'v1', credentials=creds), build('sheets', 'v4', credentials=creds)
-    except HttpError as e:
-        print(f"Auth error: {e}")
-        return None, None
+    return creds
 
-# ===================== Header utilities ========================
-def _n(x): return (str(x) if x is not None else "").strip().lower()
-NEEDED_KEYS = ("Quantity", "Type", "Manufacturer", "Part Number")
+def gmail_service():
+    return build("gmail", "v1", credentials=_load_creds())
 
-def _find_header_map_on_row(values):
-    """Detect our 4 columns on a header row. Supports combined 'Manufacturer / Product Number'."""
-    idx_map = {}
-    for idx, v in enumerate(values):
-        t = _n(v)
-        if t in {"qty", "quantity", "qnty", "qty ordered", "qty/ea"}:
-            idx_map["Quantity"] = idx
-        elif t in {"type", "item type", "category"}:
-            idx_map["Type"] = idx
-        elif ("manufacturer" in t) and ("product" in t):
-            idx_map["Manufacturer"] = idx
-            idx_map["Part Number"] = idx + 1
-        elif t in {"manufacturer", "mfr", "mfg", "brand", "vendor"}:
-            idx_map["Manufacturer"] = idx
-        elif t in {"part number", "part #", "part no", "item #", "sku", "item", "item no"}:
-            idx_map["Part Number"] = idx
-    score = sum(1 for k in NEEDED_KEYS if k in idx_map)
-    return idx_map if score >= 3 else None
+def sheets_service():
+    return build("sheets", "v4", credentials=_load_creds())
 
-# ================== XLSX / CSV readers (master sheet) ==========
-def _read_master_sheet_xlsx(file_stream, project_name, filename):
-    wb = load_workbook(file_stream, data_only=True)
-    ws = None
-    for s in wb.worksheets:
-        if _n(s.title) == "master quotation":
-            ws = s
-            break
-    if ws is None:
-        ws = wb.worksheets[0]
-        if DEBUG:
-            print(f"[DEBUG] '{filename}': 'master quotation' not found; using '{ws.title}'")
+# ---------------------------------------------------------------------------
+# GMAIL HELPERS
+# ---------------------------------------------------------------------------
 
-    header_row, header_map = None, None
-    max_check = min(200, ws.max_row or 200)
-    for r in range(1, max_check + 1):
-        vals = [ws.cell(r, c).value for c in range(1, ws.max_column + 1)]
-        if not any(vals):
+def find_label_id_by_name(gmail, name):
+    resp = gmail.users().labels().list(userId="me").execute()
+    for lbl in resp.get("labels", []):
+        if lbl.get("name") == name:
+            return lbl.get("id")
+    return None
+
+def gmail_link_from_headers(headers, thread_id):
+    msgid = next((h.get("value") for h in headers if h["name"].lower() == "message-id"), None)
+    if msgid:
+        return f'https://mail.google.com/mail/u/0/#search/rfc822msgid:{urllib.parse.quote(msgid)}'
+    return f'https://mail.google.com/mail/u/0/#inbox/{thread_id}'
+
+def get_email_body_text(payload):
+    """Collects text/plain and text/html parts, decodes, returns concatenated text."""
+    texts = []
+
+    def walk(p):
+        if "parts" in p:
+            for sp in p["parts"]:
+                yield from walk(sp)
+        else:
+            yield p
+
+    for p in walk(payload):
+        mime = p.get("mimeType", "")
+        data = p.get("body", {}).get("data")
+        if not data:
             continue
-        cand = _find_header_map_on_row(vals)
-        if cand:
-            header_row, header_map = r, cand
-            break
+        # decode
+        try:
+            t = base64.urlsafe_b64decode(data).decode("utf-8", "ignore")
+        except Exception:
+            t = base64.urlsafe_b64decode(data + "===").decode("utf-8", "ignore")
+        if mime.startswith("text/html"):
+            # very light html cleanup
+            t = re.sub(r"(?is)<(script|style).*?</\1>", " ", t)
+            t = re.sub(r"(?is)<br\s*/?>", "\n", t)
+            t = re.sub(r"(?is)</p>", "\n", t)
+            t = re.sub(r"(?is)<.*?>", " ", t)
+        texts.append(t)
 
-    if not header_map:
-        if DEBUG:
-            print(f"[DEBUG] '{filename}': no usable header row on '{ws.title}'")
-        return []
+    return "\n".join(texts)
 
-    if DEBUG:
-        print(f"[DEBUG] '{filename}': using '{ws.title}' header row {header_row} map {header_map}")
+# ---------------------------------------------------------------------------
+# BODY PARSER
+# ---------------------------------------------------------------------------
 
+def parse_items_from_text(text):
+    """
+    Returns: (items, omit_pns)
+      items: list of dicts {"Part Number","Quantity","Type","Manufacturer"}
+      omit_pns: list[str]
+    """
+    items, omit_pns = [], []
+
+    # Detect swap, e.g. "swapping the (7) ABC123 ... to (9) XYZ456"
+    swap_re = re.compile(
+        r'swapp\w*\s+the\s+\(?\s*(\d{1,5})\s*\)?\s*([A-Z0-9\-]{5,})\b.*?\bto\b.*?\(?\s*(\d{1,5})\s*\)?\s*([A-Z0-9\-]{5,})',
+        re.IGNORECASE | re.DOTALL
+    )
+    m = swap_re.search(text)
+    if m:
+        old_qty, old_pn, new_qty, new_pn = m.groups()
+        omit_pns.append(old_pn.strip())
+        items.append({"Part Number": new_pn.strip(), "Quantity": int(new_qty), "Type": "", "Manufacturer": ""})
+
+    # General patterns on separate lines:
+    # "(9) PN", "9x PN", "QTY 9 PN"
+    line_re = re.compile(
+        r'^\s*(?:\(|\b)?\s*(\d{1,5})\s*(?:\)|\b)?\s*(?:x|qty[: ]*)?\s*([A-Z][A-Z0-9\-]{4,})\b',
+        re.IGNORECASE | re.MULTILINE
+    )
+    for qty, pn in line_re.findall(text):
+        pn = pn.strip()
+        if not any(pn == i["Part Number"] for i in items):
+            items.append({"Part Number": pn, "Quantity": int(qty), "Type": "", "Manufacturer": ""})
+
+    return items, omit_pns
+
+# ---------------------------------------------------------------------------
+# ATTACHMENT PARSERS (basic)
+# ---------------------------------------------------------------------------
+
+def read_csv_bytes(b: bytes):
     rows = []
-    r = header_row + 1
-    empty_streak = 0
-    while r <= (ws.max_row or r + 500):
-        row = [ws.cell(r, c).value for c in range(1, ws.max_column + 1)] if r <= ws.max_row else []
-        if not row or not any(row):
-            empty_streak += 1
-            if empty_streak >= 3:
-                break
-            r += 1
-            continue
-        empty_streak = 0
-
-        def pick(key, default=""):
-            idx = header_map.get(key)
-            if idx is None or idx >= len(row):
-                return default
-            v = row[idx]
-            return "" if v is None else v
-
-        line = {
-            "Project": project_name.strip(),
-            "Source": filename,
-            "Type": pick("Type", ""),
-            "Part Number": str(pick("Part Number", "")).strip(),
-            "Manufacturer": pick("Manufacturer", ""),
-            "Quantity": pick("Quantity", ""),
-            "Status": "Unapproved",
-            "PO Number": "",
-            "Estimated Ship Date (ESD)":"",
-            "Date Received":"",
-            "Date Scheduled":"",
-            "Date Delivered":""
-        }
-        if any([line["Part Number"], line["Manufacturer"], line["Type"]]):
-            rows.append(line)
-        r += 1
+    s = io.StringIO(b.decode("utf-8", "ignore"))
+    rdr = csv.DictReader(s)
+    for r in rdr:
+        rows.append(r)
     return rows
 
-def _read_master_sheet_csv(file_bytes, project_name, filename):
-    df = pd.read_csv(io.BytesIO(file_bytes))
-    cols = list(df.columns)
-    rename = {}
-    for i, c in enumerate(cols):
-        t = _n(c)
-        if t in {"qty", "quantity", "qnty", "qty ordered", "qty/ea"}:
-            rename[c] = "Quantity"
-        elif t in {"type", "item type", "category"}:
-            rename[c] = "Type"
-        elif ("manufacturer" in t) and ("product" in t):
-            rename[c] = "Manufacturer"
-            if i + 1 < len(cols):
-                rename[cols[i + 1]] = "Part Number"
-        elif t in {"manufacturer", "mfr", "mfg", "brand", "vendor"}:
-            rename[c] = "Manufacturer"
-        elif t in {"part number", "part #", "part no", "item #", "sku", "item", "item no"}:
-            rename[c] = "Part Number"
-    if rename:
-        df = df.rename(columns=rename)
+def read_xlsx_bytes_to_rows(b: bytes):
+    rows = []
+    with io.BytesIO(b) as bio:
+        df = pd.read_excel(bio, engine="openpyxl")
+    for _, r in df.fillna("").iterrows():
+        rows.append({k: str(v).strip() for k, v in r.items()})
+    return rows
 
-    out = []
-    for _, rec in df.iterrows():
-        line = {
-            "Project": project_name.strip(),
-            "Source": filename,
-            "Type": rec.get("Type", ""),
-            "Part Number": str(rec.get("Part Number", "")).strip(),
-            "Manufacturer": rec.get("Manufacturer", ""),
-            "Quantity": rec.get("Quantity", ""),
-            "Status": "Unapproved",
-            "PO Number": "",
-            "Estimated Ship Date (ESD)":"",
-            "Date Received":"",
-            "Date Scheduled":"",
-            "Date Delivered":""
-        }
-        if any([line["Part Number"], line["Manufacturer"], line["Type"]]):
-            out.append(line)
+def rows_to_items(rows):
+    """
+    Try to map common column names to the schema. Extend this map as you see examples.
+    """
+    mapped = []
+    for r in rows:
+        pn = r.get("Part Number") or r.get("PartNumber") or r.get("Part") or r.get("PN") or r.get("Item") or ""
+        qty = r.get("Quantity") or r.get("Qty") or r.get("QTY") or r.get("QTY Ordered") or r.get("QTY Req") or ""
+        mfr = r.get("Manufacturer") or r.get("MFR") or r.get("Brand") or ""
+        typ = r.get("Type") or r.get("Line Type") or ""
+        if pn and qty:
+            try:
+                q = int(str(qty).strip().replace(",", ""))
+            except Exception:
+                continue
+            mapped.append({"Part Number": str(pn).strip(), "Quantity": q, "Type": str(typ).strip(), "Manufacturer": str(mfr).strip()})
+    return mapped
+
+# ---------------------------------------------------------------------------
+# SHEETS HELPERS
+# ---------------------------------------------------------------------------
+
+def sheet_titles_map(svc):
+    meta = svc.spreadsheets().get(spreadsheetId=SPREADSHEET_ID).execute()
+    out = {}
+    for sh in meta.get("sheets", []):
+        props = sh.get("properties", {})
+        out[props.get("title")] = props.get("sheetId")
     return out
 
-# =========================== Gmail =============================
-def get_emails(gmail_service):
-    print("Fetching emails from PUMA inbox...")
-    out = []
-    req = gmail_service.users().messages().list(
-        userId="me",
-        labelIds=["Label_216878436602330283"],   # <-- put actual PUMA - RFA label ID here
-        q="is:unread has:attachment",
-        maxResults=100
-    )
-    while req is not None:
-        resp = req.execute()
-        out.extend(resp.get("messages", []))
-        req = gmail_service.users().messages().list_next(previous_request=req, previous_response=resp)
-    print(f"Found {len(out)} unread RFA email(s).") if out else print("No new RFA emails found.")
-    return out
+def apply_omissions_and_append(svc, project_name, data_items, omit_pns, src_link, src_text):
+    tab = f"{project_name} - Project Tracker"
+    titles = sheet_titles_map(svc)
+    if tab not in titles:
+        print(f"[WARN] Missing tracker tab: {tab}")
+        return
+    sheet_id = titles[tab]
 
-def _is_rfa_subject(s: str) -> bool:
-    if not s:
-        return False
-    su = s.strip().upper()
-    return su.startswith("RFA")  # guard variants implicitly
+    # mark omissions: search column D (Part Number)
+    if omit_pns:
+        colD = svc.spreadsheets().values().get(
+            spreadsheetId=SPREADSHEET_ID, range=f"{tab}!D2:D"
+        ).execute().get("values", [])
+        requests, value_updates = [], []
+        for idx, v in enumerate(colD, start=2):
+            pn = (v[0] if v else "").strip()
+            if pn in omit_pns:
+                # Strike-through C, D, E (0-indexed: C=2, E=4)
+                requests.append({
+                    "repeatCell": {
+                        "range": {
+                            "sheetId": sheet_id,
+                            "startRowIndex": idx - 1,
+                            "endRowIndex": idx,
+                            "startColumnIndex": 2,
+                            "endColumnIndex": 5
+                        },
+                        "cell": {"userEnteredFormat": {"textFormat": {"strikethrough": True}}},
+                        "fields": "userEnteredFormat.textFormat.strikethrough"
+                    }
+                })
+                # Set Status (G) to Omitted
+                value_updates.append({"range": f"{tab}!G{idx}", "values": [["Omitted"]]})
 
-def get_and_process_emails_single(gmail_service, message_ref):
-    try:
-        msg = gmail_service.users().messages().get(userId="me", id=message_ref["id"], format="full").execute()
-        payload = msg.get("payload", {})
-        headers = payload.get("headers", [])
-        subject = next((h["value"] for h in headers if h["name"] == "Subject"), "")
-
-        # Hard gate: ignore non-RFA messages entirely and leave them unread
-        if not _is_rfa_subject(subject):
-            if DEBUG:
-                print(f"[SKIP] Not an RFA email: {subject}")
-            return None, []
-
-        project_name = subject.split(" - ", 1)[1] if " - " in subject else subject
-
-        parsed = []
-
-        def walk(part):
-            if "parts" in part:
-                for p in part["parts"]:
-                    yield from walk(p)
-            else:
-                yield part
-
-        for part in walk(payload):
-            filename = part.get("filename") or ""
-            if not filename or not filename.lower().endswith((".xlsx", ".csv")):
-                continue
-            attach_id = part.get("body", {}).get("attachmentId")
-            if not attach_id:
-                continue
-            att = gmail_service.users().messages().attachments().get(
-                userId="me", messageId=message_ref["id"], id=attach_id
+        if requests:
+            svc.spreadsheets().batchUpdate(
+                spreadsheetId=SPREADSHEET_ID, body={"requests": requests}
             ).execute()
-            file_data = base64.urlsafe_b64decode(att["data"])
-            file_stream = io.BytesIO(file_data)
+        if value_updates:
+            svc.spreadsheets().values().batchUpdate(
+                spreadsheetId=SPREADSHEET_ID,
+                body={"valueInputOption": "USER_ENTERED", "data": value_updates}
+            ).execute()
 
-            if filename.lower().endswith(".xlsx"):
-                rows = _read_master_sheet_xlsx(file_stream, project_name, filename)
-            else:
-                rows = _read_master_sheet_csv(file_data, project_name, filename)
-            parsed.extend(rows)
-
-        # Mark email as read only after successful parse
-        gmail_service.users().messages().modify(
-            userId="me", id=message_ref["id"], body={"removeLabelIds": ["UNREAD"]}
-        ).execute()
-        print(f"Processed {len(parsed)} row(s) from: {subject}")
-        return project_name, parsed
-
-    except HttpError as e:
-        print(f"Gmail API error on {message_ref.get('id')}: {e}")
-        return "(unknown project)", []
-    except Exception as e:
-        print(f"Unexpected error on {message_ref.get('id')}: {e}")
-        return "(unknown project)", []
-
-# ========================== Sheets =============================
-def sheet_titles_map(sheets_service):
-    meta = sheets_service.spreadsheets().get(spreadsheetId=SPREADSHEET_ID).execute()
-    return {s['properties']['title']: s['properties']['sheetId'] for s in meta.get('sheets', [])}
-
-def _is_tax_or_total(line: dict) -> bool:
-    for key in ("Type", "Part Number", "Manufacturer"):
-        val = _n(line.get(key, ""))
-        if any(tok in val for tok in ("tax", "total")):
-            return True
-    return False
-
-def update_existing_project_tracker(sheets_service, project_name, data_rows):
-    tab_tracker = f"{project_name} - Project Tracker"
-    titles = sheet_titles_map(sheets_service)
-
-    if tab_tracker not in titles:
-        print(f"[WARN] Project tracker tab not found for '{project_name}'. Expected tab named: {tab_tracker}. Skipping append.")
-        return
-
-    if not data_rows:
-        print("No data to append.")
-        return
-
-    filtered = [d for d in data_rows if not _is_tax_or_total(d)]
-    if not filtered:
-        print("All parsed rows were filtered (tax/total). Nothing to append.")
+    # Append new rows
+    if not data_items:
         return
 
     values = []
-    for d in filtered:
+    for it in data_items:
         values.append([
-            d.get('Project',''), d.get('Source',''), d.get('Type',''),
-            d.get('Part Number',''), d.get('Manufacturer',''), d.get('Quantity',''),
-            d.get('Status',''), d.get('PO Number',''), d.get('Estimated Ship Date (ESD)',''),
-            d.get('Date Received',''), d.get('Date Scheduled',''), d.get('Date Delivered','')
+            project_name,
+            f'=HYPERLINK("{src_link}","{src_text}")',
+            it.get("Type", ""),
+            it.get("Part Number", ""),
+            it.get("Manufacturer", ""),
+            it.get("Quantity", ""),
+            "Unapproved",  # Status
+            "",  # PO Number
+            "",  # Estimated Ship Date (ESD)
+            "",  # Date Received
+            "",  # Date Scheduled
+            ""   # Date Delivered
         ])
 
-    sheets_service.spreadsheets().values().append(
-        spreadsheetId=SPREADSHEET_ID, range=f"{tab_tracker}!A2:L",
-        valueInputOption='USER_ENTERED', body={'values': values}
+    svc.spreadsheets().values().append(
+        spreadsheetId=SPREADSHEET_ID,
+        range=f"{tab}!A2:L",
+        valueInputOption="USER_ENTERED",
+        body={"values": values}
     ).execute()
-    print(f"Sheet '{tab_tracker}' updated with {len(values)} row(s).")
 
+    print(f"Sheet '{tab}' updated with {len(values)} row(s).")
 
-# ============================ Main =============================
-if __name__ == '__main__':
+# ---------------------------------------------------------------------------
+# EMAIL -> PARSE -> SHEETS
+# ---------------------------------------------------------------------------
+
+def looks_like_rfa_subject(subject):
+    # Accept "RFA - <Project>" or "RFA – <Project>" or "[RFA] <Project>"
+    return bool(re.search(r'\bRFA\b', subject, re.IGNORECASE))
+
+def process_message(gmail, sheets, msg_ref):
+    msg = gmail.users().messages().get(userId="me", id=msg_ref["id"], format="full").execute()
+    payload = msg.get("payload", {})
+    headers = payload.get("headers", [])
+    subject = next((h["value"] for h in headers if h["name"] == "Subject"), "")
+    if not looks_like_rfa_subject(subject):
+        if DEBUG: print(f"[SKIP] Not an RFA: {subject}")
+        return
+
+    # Project Name: split at first " - " or " – "
+    project_name = subject
+    if " - " in subject:
+        project_name = subject.split(" - ", 1)[1].strip()
+    elif " – " in subject:
+        project_name = subject.split(" – ", 1)[1].strip()
+
+    # Source link + text
+    src_link = gmail_link_from_headers(headers, msg.get("threadId"))
+    date_hdr = next((h["value"] for h in headers if h["name"] == "Date"), "")
+    src_text = f"RFA – {project_name} {date_hdr}".strip()
+
+    parsed_items = []
+    omit_pns = []
+
+    # 1) Parse structured attachments
+    def walk(part):
+        if "parts" in part:
+            for p in part["parts"]:
+                yield from walk(p)
+        else:
+            yield part
+
+    for part in walk(payload):
+        filename = part.get("filename") or ""
+        if not filename:
+            continue
+        body = part.get("body", {})
+        attach_id = body.get("attachmentId")
+        if not attach_id:
+            continue
+
+        if filename.lower().endswith(".csv") or filename.lower().endswith(".xlsx"):
+            att = gmail.users().messages().attachments().get(
+                userId="me", messageId=msg_ref["id"], id=attach_id
+            ).execute()
+            data = base64.urlsafe_b64decode(att["data"])
+            try:
+                if filename.lower().endswith(".csv"):
+                    rows = read_csv_bytes(data)
+                else:
+                    rows = read_xlsx_bytes_to_rows(data)
+                parsed_items.extend(rows_to_items(rows))
+                if DEBUG: print(f"Parsed {len(parsed_items)} item(s) from {filename}")
+            except Exception as e:
+                print(f"[WARN] Failed to parse {filename}: {e}")
+
+    # 2) Parse email body
     try:
-        import openpyxl  # noqa
-    except ImportError:
-        print("openpyxl not found. Installing...")
-        os.system("pip install openpyxl")
-        import openpyxl  # noqa
+        body_text = get_email_body_text(payload)
+        body_items, body_omits = parse_items_from_text(body_text)
+        parsed_items.extend(body_items)
+        omit_pns.extend(body_omits)
+    except Exception as e:
+        print(f"[WARN] Body parse error: {e}")
 
-    gmail_service, sheets_service = setup_services()
-    if gmail_service and sheets_service:
-        messages = get_emails(gmail_service)
-        if messages:
-            for m in messages:
-                try:
-                    project_name, rows = get_and_process_emails_single(gmail_service, m)
-                    if project_name is None:
-                        continue
-                    update_existing_project_tracker(sheets_service, project_name, rows)
-                except Exception as e:
-                    print(f"Error processing a message; continuing. Details: {e}")
-    print("PUMA1_RFA automation finished.")
+    # Normalize to our append schema
+    norm_items = []
+    for it in parsed_items:
+        norm_items.append({
+            "Part Number": it.get("Part Number", "").strip(),
+            "Quantity": int(it.get("Quantity", 0)) if str(it.get("Quantity","")).strip().isdigit() else it.get("Quantity",""),
+            "Type": it.get("Type", ""),
+            "Manufacturer": it.get("Manufacturer", "")
+        })
+
+    # Write to Sheets (omissions first)
+    apply_omissions_and_append(sheets, project_name, norm_items, list(set(omit_pns)), src_link, src_text)
+
+    # Mark email as read
+    gmail.users().messages().modify(
+        userId="me", id=msg_ref["id"], body={"removeLabelIds": ["UNREAD"]}
+    ).execute()
+
+def run():
+    gm = gmail_service()
+    sh = sheets_service()
+
+    label_id = find_label_id_by_name(gm, RFA_LABEL_NAME)
+    if not label_id:
+        print(f"ERROR: Gmail label '{RFA_LABEL_NAME}' not found.")
+        return
+
+    req = gm.users().messages().list(
+        userId="me",
+        labelIds=[label_id],
+        q="is:unread",
+        maxResults=100
+    )
+    resp = req.execute()
+    msgs = resp.get("messages", [])
+
+    if not msgs:
+        if DEBUG: print("No unread RFA messages.")
+        return
+
+    for m in msgs:
+        try:
+            process_message(gm, sh, m)
+        except HttpError as e:
+            print(f"[ERROR] Gmail/Sheets API: {e}")
+        except Exception as e:
+            print(f"[ERROR] Unexpected: {e}")
+
+if __name__ == "__main__":
+    run()
