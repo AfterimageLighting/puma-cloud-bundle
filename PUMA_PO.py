@@ -151,16 +151,32 @@ def iter_message_attachments(gmail, message: Dict[str, Any]) -> Iterable[Tuple[s
 # ===================== DRIVE / SHEETS HELPERS =====================
 
 def _ensure_subfolder(drive, parent_id: str, name: str) -> str:
-    q = "mimeType='application/vnd.google-apps.folder' and name=@name and trashed=false and '\
-{}' in parents".format(parent_id)
-    res = drive.files().list(
-        q=q, spaces="drive", fields="files(id,name)", supportsAllDrives=True,
-        includeItemsFromAllDrives=True, corpora="allDrives",
-        param={"name": name}
+    # Find existing subfolder by name under parent
+    safe_name = name.replace("'", "\\'")
+    q = (
+        f"name = '{safe_name}' and "
+        f"mimeType = 'application/vnd.google-apps.folder' and "
+        f"'{parent_id}' in parents and "
+        f"trashed = false"
+    )
+    resp = drive.files().list(
+        q=q,
+        spaces="drive",
+        fields="files(id,name)",
+        pageSize=10,
     ).execute()
-    for f in res.get("files", []):
-        if f.get("name") == name:
-            return f["id"]
+    files = resp.get("files", [])
+    if files:
+        return files[0]["id"]
+
+    # Create it if missing
+    meta = {
+        "name": name,
+        "mimeType": "application/vnd.google-apps.folder",
+        "parents": [parent_id],
+    }
+    folder = drive.files().create(body=meta, fields="id").execute()
+    return folder["id"]
 
     meta = {
         "name": name,
