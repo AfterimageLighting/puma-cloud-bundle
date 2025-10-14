@@ -164,6 +164,8 @@ def _ensure_subfolder(drive, parent_id: str, name: str) -> str:
         spaces="drive",
         fields="files(id,name)",
         pageSize=10,
+        includeItemsFromAllDrives=True,
+        supportsAllDrives=True,
     ).execute()
     files = resp.get("files", [])
     if files:
@@ -175,16 +177,12 @@ def _ensure_subfolder(drive, parent_id: str, name: str) -> str:
         "mimeType": "application/vnd.google-apps.folder",
         "parents": [parent_id],
     }
-    folder = drive.files().create(body=meta, fields="id").execute()
-    return folder["id"]
-
-    meta = {
-        "name": name,
-        "mimeType": "application/vnd.google-apps.folder",
-        "parents": [parent_id],
-    }
-    folder = drive.files().create(body=meta, fields="id",
-                                  supportsAllDrives=True).execute()
+    
+    folder = drive.files().create(
+        body=meta,
+        fields="id",
+        supportsAllDrives=True,
+    ).execute()
     return folder["id"]
 
 
