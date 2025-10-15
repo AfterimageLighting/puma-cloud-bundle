@@ -283,15 +283,17 @@ def apply_omissions_and_append(svc, project_name, data_items, omit_pns, src_link
 # ---------------------------------------------------------------------------
 
 def looks_like_rfa_subject(subject):
-    # Accept "RFA - <Project>" or "RFA – <Project>" or "[RFA] <Project>"
+    # still useful if you WANT a subject gate
     return bool(re.search(r'\bRFA\b', subject, re.IGNORECASE))
+
+REQUIRE_SUBJECT = os.getenv("PUMA_RFA_REQUIRE_SUBJECT", "1") not in ("0","false","False","no")
 
 def process_message(gmail, sheets, msg_ref):
     msg = gmail.users().messages().get(userId="me", id=msg_ref["id"], format="full").execute()
     payload = msg.get("payload", {})
     headers = payload.get("headers", [])
     subject = next((h["value"] for h in headers if h["name"] == "Subject"), "")
-    if not looks_like_rfa_subject(subject):
+    if REQUIRE_SUBJECT and not looks_like_rfa_subject(subject):
         if DEBUG: print(f"[SKIP] Not an RFA: {subject}")
         return
 
@@ -375,29 +377,54 @@ def run():
 
     label_id = find_label_id_by_name(gm, RFA_LABEL_NAME)
     if not label_id:
-        print(f"ERROR: Gmail label '{RFA_LABEL_NAME}' not found.")
+        print(f"ERROR: Gmail label '{os.getenv('PUMA_RFA_LABEL_NAME', RFA_LABEL_NAME)}' not found.")
         return
 
-    req = gm.users().messages().list(
-        userId="me",
-        labelIds=[label_id],
-        q="is:unread",
-        maxResults=100
-    )
-    resp = req.execute()
-    msgs = resp.get("messages", [])
+    raw = os.getenv("PUMA_RFA_QUERY", "is:unread")
+    query = (raw or "").strip()
+    if query.upper() in ("ALL", "ANY", "NONE", "BLANK", "*", "NULL"):
+        query = ""  # treat as no filter (process ALL messages in the label)
 
-    if not msgs:
-        if DEBUG: print("No unread RFA messages.")
-        return
+    page_token = None
+    total = 0
 
-    for m in msgs:
-        try:
-            process_message(gm, sh, m)
-        except HttpError as e:
-            print(f"[ERROR] Gmail/Sheets API: {e}")
-        except Exception as e:
-            print(f"[ERROR] Unexpected: {e}")
+    while True:
+        list_args = {
+            "userId": "me",
+            "labelIds": [label_id],
+            "maxResults": 500,  # larger page size
+        }
+        # Only include q when non-empty (empty 'q' is invalid)
+        if query != "":
+            list_args["q"] = query
+        if page_token:
+            list_args["pageToken"] = page_token
+
+        resp = gm.users().messages().list(**list_args).execute()
+        msgs = resp.get("messages", [])
+        if not msgs:
+            if total == 0 and DEBUG:
+                print("No messages matched label/query.")
+            break
+
+        total += len(msgs)
+        if DEBUG:
+            print(f"Fetched {len(msgs)} message refs (running total {total})")
+
+        for m in msgs:
+            try:
+                process_message(gm, sh, m)
+            except HttpError as e:
+                print(f"[ERROR] Gmail/Sheets API: {e}")
+            except Exception as e:
+                print(f"[ERROR] Unexpected: {e}")
+
+        page_token = resp.get("nextPageToken")
+        if not page_token:
+            break
+
+    if DEBUG:
+        print("Done scanning label.")
 
 if __name__ == "__main__":
     run()
