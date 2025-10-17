@@ -74,11 +74,42 @@ def sheets_service():
 # GMAIL HELPERS
 # ---------------------------------------------------------------------------
 
-def find_label_id_by_name(gmail, name):
+def _normalize_label_name(s: str) -> str:
+    if not s:
+        return ""
+    s = s.replace("—", "-").replace("–", "-")           # em/en dashes -> hyphen
+    s = re.sub(r"\s+", " ", s.strip())                  # collapse spaces
+    return s.lower()
+
+def find_label_id_by_name(gmail, fallback_name):
+    # If user provided an ID, trust it.
+    env_id = os.getenv("PUMA_RFA_LABEL_ID", "").strip()
+    if env_id:
+        return env_id
+
+    want = _normalize_label_name(os.getenv("PUMA_RFA_LABEL_NAME", fallback_name))
+
+    # Show which account we're using (when DEBUG=1)
+    try:
+        prof = gmail.users().getProfile(userId="me").execute()
+        if os.getenv("DEBUG", "0") == "1":
+            print(f"Gmail profile email: {prof.get('emailAddress')}")
+    except Exception as e:
+        print(f"[WARN] Could not get Gmail profile: {e}")
+
     resp = gmail.users().labels().list(userId="me").execute()
-    for lbl in resp.get("labels", []):
-        if lbl.get("name") == name:
+    labels = resp.get("labels", [])
+
+    # Try normalized exact match
+    for lbl in labels:
+        name = lbl.get("name", "")
+        if _normalize_label_name(name) == want:
             return lbl.get("id")
+
+    # Not found: dump available labels once to help debug
+    print(f"[RFA] Label '{os.getenv('PUMA_RFA_LABEL_NAME', fallback_name)}' not found. Available labels:")
+    for lbl in labels:
+        print(f" - {lbl.get('name')}  (id: {lbl.get('id')})")
     return None
 
 def gmail_link_from_headers(headers, thread_id):
@@ -424,7 +455,7 @@ def run():
             break
 
     if DEBUG:
-        print("Done scanning label.")
+        print("[RFA] Running PUMA_RFA with DEBUG=1")
 
 if __name__ == "__main__":
     run()
