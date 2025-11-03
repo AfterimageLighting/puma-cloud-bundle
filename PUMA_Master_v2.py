@@ -1,14 +1,37 @@
-﻿"""
-PUMA_Master_v2.py â€” Orchestrator with single OAuth, lockfile, logging, retries, step filtering, and summary.
-Order (default): OKD, RFA, RFPO, PO, RR, RFPS, DR
+#!/usr/bin/env python3
 """
-import os, sys, json, time, shlex, subprocess, datetime
+PUMA_Master_v2.py — Orchestrator with single OAuth, lockfile, logging, retries,
+env-based step filtering, and summary.
+
+Default step order: OKD, RFA, RFPO, PO, RR, RFPS, DR
+
+To constrain steps at deploy/runtime (no code changes):
+  - Allow-list:  PUMA_ALLOWED_STEPS=OKD,PO,RFPS
+  - Block-list:  PUMA_DISABLED_STEPS=RFA,RFPO,RR,DR
+
+CLI still supported:
+  --steps OKD,PO,RFPS
+  --timeout-sec 900
+  --retries 1
+  --debug / --nodebug
+  --dry-run
+"""
+import os
+import sys
+import json
+import time
+import shlex
+import subprocess
+import datetime
 from typing import List, Dict
 
+# ----------------------------
+# Pipeline definition
+# ----------------------------
 STEPS = [
     ("OKD",   "PUMA_OKD.py",  []),
-    ("RFA",   "PUMA_RFA.py",   []),
-    ("RFPO",  "PUMA_RFPO.py",  []),
+    ("RFA",   "PUMA_RFA.py",  []),
+    ("RFPO",  "PUMA_RFPO.py", []),
     ("PO",    "PUMA_PO.py",   [
         "--label", "PUMA/PUMA - PO",
         "--only-unread",
@@ -16,11 +39,14 @@ STEPS = [
         "--exclude-rfpo",
         "--mark-read",
     ]),
-    ("RR",    "PUMA_RR.py",    []),
-    ("RFPS",  "PUMA_RFPS.py",  []),
-    ("DR",    "PUMA_DR.py",    []),
+    ("RR",    "PUMA_RR.py",   []),
+    ("RFPS",  "PUMA_RFPS.py", []),
+    ("DR",    "PUMA_DR.py",   []),
 ]
 
+# ----------------------------
+# Google auth bootstrap (union scopes)
+# ----------------------------
 UNION_SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/gmail.modify",
@@ -28,11 +54,11 @@ UNION_SCOPES = [
     "https://www.googleapis.com/auth/drive",
 ]
 
-def _now_ts():
+def _now_ts() -> str:
     return datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
-def bootstrap_auth():
-    # ⬇️ ADD THIS GUARD (first lines of the function)
+def bootstrap_auth() -> None:
+    # Fast-path for service-style creds provided via env (used by your Cloud Run)
     if (
         os.getenv("GMAIL_CLIENT_ID")
         and os.getenv("GMAIL_CLIENT_SECRET")
@@ -47,7 +73,10 @@ def bootstrap_auth():
         from google.auth.transport.requests import Request
     except Exception:
         print("[AUTH] Installing Google auth dependencies...")
-        os.system(f"{sys.executable} -m pip install --quiet google-api-python-client google-auth-httplib2 google-auth-oauthlib")
+        os.system(
+            f"{sys.executable} -m pip install --quiet "
+            "google-api-python-client google-auth-httplib2 google-auth-oauthlib"
+        )
         from google.oauth2.credentials import Credentials
         from google_auth_oauthlib.flow import InstalledAppFlow
         from google.auth.transport.requests import Request
@@ -58,14 +87,14 @@ def bootstrap_auth():
         try:
             creds = Credentials.from_authorized_user_file(token_path, UNION_SCOPES)
             if creds and creds.valid:
-                print("[AUTH] Existing token.json already covers all required scopes. âœ”")
+                print("[AUTH] Existing token.json already covers all required scopes. ✓")
                 return
             if creds and creds.expired and creds.refresh_token:
                 print("[AUTH] Refreshing existing token...")
                 creds.refresh(Request())
                 with open(token_path, "w", encoding="utf-8") as f:
                     f.write(creds.to_json())
-                print("[AUTH] Token refreshed. âœ”")
+                print("[AUTH] Token refreshed. ✓")
                 return
             else:
                 print("[AUTH] Existing token.json missing scopes or cannot refresh; re-authorizing...")
@@ -80,8 +109,11 @@ def bootstrap_auth():
     creds = flow.run_local_server(port=0)
     with open(token_path, "w", encoding="utf-8") as f:
         f.write(creds.to_json())
-    print("[AUTH] token.json created with ALL required scopes. âœ”")
+    print("[AUTH] token.json created with ALL required scopes. ✓")
 
+# ----------------------------
+# Logging and helpers
+# ----------------------------
 class TeeLogger:
     def __init__(self, path: str):
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -118,7 +150,16 @@ def release_lock(lock_path: str) -> None:
     except FileNotFoundError:
         pass
 
-def run_step(label: str, script: str, extra_args: List[str], debug_flag: str, timeout_sec: int, retries: int, logger: TeeLogger, dry_run: bool) -> Dict:
+def run_step(
+    label: str,
+    script: str,
+    extra_args: List[str],
+    debug_flag: str,
+    timeout_sec: int,
+    retries: int,
+    logger: TeeLogger,
+    dry_run: bool,
+) -> Dict:
     result = {
         "label": label,
         "script": script,
@@ -130,7 +171,7 @@ def run_step(label: str, script: str, extra_args: List[str], debug_flag: str, ti
     }
     script_path = os.path.join(os.getcwd(), script)
     if not os.path.isfile(script_path):
-        logger.write(f"[{label}] SKIP â€” {script} not found in {os.getcwd()}\n")
+        logger.write(f"[{label}] SKIP — {script} not found in {os.getcwd()}\n")
         return result
 
     cmd_parts: List[str] = [sys.executable, script_path]
@@ -146,9 +187,9 @@ def run_step(label: str, script: str, extra_args: List[str], debug_flag: str, ti
     for attempt in range(1, retries + 1):
         start = time.time()
         result["attempts"] = attempt
-        logger.write("\nâ€” â€” â€” â€” â€” â€” â€” â€” â€” â€” â€” â€” â€” â€” â€” â€” â€” â€”\n")
+        logger.write("\n— — — — — — — — — — — — — — — — —\n")
         logger.write(f"[{label}] Running: {cmd}\n")
-        logger.write("â€” â€” â€” â€” â€” â€” â€” â€” â€” â€” â€” â€” â€” â€” â€” â€” â€” â€”\n")
+        logger.write("— — — — — — — — — — — — — — — — —\n")
 
         proc = subprocess.Popen(
             cmd_parts,
@@ -156,7 +197,7 @@ def run_step(label: str, script: str, extra_args: List[str], debug_flag: str, ti
             stderr=subprocess.STDOUT,
             text=True,
             encoding="utf-8",
-            errors="replace"
+            errors="replace",
         )
         step_emails_guess = None
         try:
@@ -181,7 +222,7 @@ def run_step(label: str, script: str, extra_args: List[str], debug_flag: str, ti
         result["emails_found_guess"] = step_emails_guess
 
         if rc == 0:
-            logger.write(f"[{label}] Completed âœ”\n")
+            logger.write(f"[{label}] Completed ✓\n")
             result["status"] = "ok"
             break
         else:
@@ -195,12 +236,25 @@ def run_step(label: str, script: str, extra_args: List[str], debug_flag: str, ti
 
     return result
 
+# ----------------------------
+# Env parsing helpers (NEW)
+# ----------------------------
+def _parse_csv_env(name: str):
+    v = os.getenv(name, "").strip()
+    if not v:
+        return None
+    return {s.strip().upper() for s in v.split(",") if s.strip()}
+
+# ----------------------------
+# Main
+# ----------------------------
 def main():
     debug_flag = ""
     if "--debug" in sys.argv:
         debug_flag = "--debug"
     elif "--nodebug" in sys.argv:
         debug_flag = "--nodebug"
+
     dry_run = ("--dry-run" in sys.argv)
 
     try:
@@ -208,17 +262,26 @@ def main():
     except Exception:
         retries = 1
     try:
-        timeout_sec = int(sys.argv[sys.argv.index("--timeout-sec")+1]) if "--timeout-sec" in sys.argv else 15*60
+        timeout_sec = int(sys.argv[sys.argv.index("--timeout-sec")+1]) if "--timeout-sec" in sys.argv else 15 * 60
     except Exception:
-        timeout_sec = 15*60
+        timeout_sec = 15 * 60
 
+    # CLI step filter (still supported)
     selected_steps = None
     if "--steps" in sys.argv:
         try:
-            selected_steps = [s.strip().upper() for s in sys.argv[sys.argv.index("--steps")+1].split(",") if s.strip()]
+            selected_steps = [
+                s.strip().upper()
+                for s in sys.argv[sys.argv.index("--steps") + 1].split(",")
+                if s.strip()
+            ]
         except Exception:
             print("Bad --steps value. Use like: --steps OKD,PO,RR")
             sys.exit(3)
+
+    # NEW: env-based gating (only applied when --steps is NOT supplied)
+    allowed_set  = _parse_csv_env("PUMA_ALLOWED_STEPS")
+    disabled_set = _parse_csv_env("PUMA_DISABLED_STEPS")
 
     run_id = _now_ts()
     logs_dir = os.path.join(os.getcwd(), "logs")
@@ -236,8 +299,20 @@ def main():
 
         steps_to_run = []
         for label, script, extra in STEPS:
-            if selected_steps is None or label in selected_steps:
-                steps_to_run.append((label, script, extra))
+            # If CLI --steps provided, that takes precedence
+            if selected_steps is not None and label not in selected_steps:
+                continue
+
+            # Otherwise, consider env filters
+            if selected_steps is None:
+                if allowed_set is not None and label not in allowed_set:
+                    logger.write(f"[MASTER] Skipping {label} (not in PUMA_ALLOWED_STEPS)\n")
+                    continue
+                if disabled_set is not None and label in disabled_set:
+                    logger.write(f"[MASTER] Skipping {label} (listed in PUMA_DISABLED_STEPS)\n")
+                    continue
+
+            steps_to_run.append((label, script, extra))
 
         summary = {"run_id": run_id, "started_at": run_id, "steps": [], "overall_status": "ok"}
 
@@ -255,7 +330,11 @@ def main():
             f.write(f"PUMA run summary ({run_id})\n")
             f.write(f"Overall: {summary['overall_status']}\n\n")
             for s in summary["steps"]:
-                f.write(f"- {s['label']}: {s['status']}  (rc={s['return_code']}, emails~={s['emails_found_guess']}, duration={s['duration_sec']}s, attempts={s['attempts']})\n")
+                f.write(
+                    f"- {s['label']}: {s['status']}  "
+                    f"(rc={s['return_code']}, emails~={s['emails_found_guess']}, "
+                    f"duration={s['duration_sec']}s, attempts={s['attempts']})\n"
+                )
 
         logger.write("\n[MASTER] Summary written:\n")
         logger.write(f"  {json_path}\n  {txt_path}\n")
@@ -267,4 +346,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
