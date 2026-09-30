@@ -29,7 +29,7 @@ def list_dr_messages(gmail):
         messages.extend(response.get("messages", []))
         request = gmail.users().messages().list_next(previous_request=request, previous_response=response)
     return messages
-DR_BASE_FOLDER_ID = "1b6W8VNs77TA-UC5j-8NryQxlAebXYSyI"
+DR_BASE_FOLDER_ID = os.getenv('PUMA_DR_BASE_FOLDER_ID', '1b6W8VNs77TA-UC5j-8NryQxlAebXYSyI').strip()
 MAKE_LINK_PUBLIC = False
 DEBUG = True
 if "--nodebug" in sys.argv:
