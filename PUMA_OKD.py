@@ -12,7 +12,7 @@ from openpyxl import load_workbook
 from puma_project_resolver import resolve_okd_project, clean_subject_project
 
 # ============================ Config ============================
-SPREADSHEET_ID = '1pwVlYSGVjyTCLt4GT7xU2TCnxfdJuxAbp_jU6Snisls'
+SPREADSHEET_ID = os.getenv('PUMA_SPREADSHEET_ID', '1pwVlYSGVjyTCLt4GT7xU2TCnxfdJuxAbp_jU6Snisls').strip()
 SCOPES = [
     'https://www.googleapis.com/auth/gmail.readonly',
     'https://www.googleapis.com/auth/gmail.modify',
@@ -184,7 +184,7 @@ def get_emails(gmail_service):
     out = []
     req = gmail_service.users().messages().list(
         userId="me",
-        labelIds=["Label_1716122347040870890"],   # <-- your real PUMA - OKD label ID
+        labelIds=[os.getenv('PUMA_OKD_LABEL_ID', 'Label_1716122347040870890')],
         q="is:unread has:attachment",
         maxResults=100
     )
