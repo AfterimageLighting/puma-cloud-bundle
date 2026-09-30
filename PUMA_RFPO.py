@@ -4,7 +4,7 @@ from typing import List, Tuple, Dict, Optional
 from puma_project_resolver import resolve_subject_to_existing_tracker
 
 # ============================ Config ============================
-SPREADSHEET_ID = '1pwVlYSGVjyTCLt4GT7xU2TCnxfdJuxAbp_jU6Snisls'
+SPREADSHEET_ID = os.getenv('PUMA_SPREADSHEET_ID', '1pwVlYSGVjyTCLt4GT7xU2TCnxfdJuxAbp_jU6Snisls').strip()
 SCOPES = [
     'https://www.googleapis.com/auth/gmail.readonly',
     'https://www.googleapis.com/auth/gmail.modify',
@@ -19,7 +19,7 @@ def list_dr_messages(gmail):
     messages = []
     request = gmail.users().messages().list(
         userId="me",
-        labelIds=["Label_1550910640571640980"],           # <-- put the actual PUMA - RFPO label ID here
+        labelIds=[os.getenv('PUMA_RFPO_LABEL_ID', 'Label_1550910640571640980')],
         q="is:unread",            # keep it unread
         maxResults=50
     )
@@ -113,7 +113,7 @@ def list_rfpo_messages(gmail):
     msgs = []
     req = gmail.users().messages().list(
         userId="me",
-        labelIds=["Label_1550910640571640980"],   # <-- replace with your actual RFPO label ID
+        labelIds=[os.getenv('PUMA_RFPO_LABEL_ID', 'Label_1550910640571640980')],
         q="is:unread has:attachment",
         maxResults=100
     )
