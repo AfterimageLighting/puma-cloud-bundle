@@ -26,7 +26,7 @@ SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
 ]
 
-DEFAULT_LABEL_VISIBLE_NAME = "PUMA/PUMA - PO"
+DEFAULT_LABEL_VISIBLE_NAME = os.getenv("PUMA_PO_LABEL_NAME", "PUMA/PUMA - PO").strip()
 TAB_MATCHED   = "PO Matched"
 TAB_UNMATCHED = "PO Unmatched"
 
