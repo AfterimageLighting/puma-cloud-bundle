@@ -296,3 +296,96 @@ def resolve_subject_to_existing_tracker(
         guess,
         parts=parts,
     )
+
+
+def _open_project_names(sheets_service, spreadsheet_id: str) -> List[str]:
+    """Read Open Projects column A as the new-project authority."""
+    try:
+        res = sheets_service.spreadsheets().values().get(
+            spreadsheetId=spreadsheet_id,
+            range="'Open Projects'!A2:A"
+        ).execute()
+    except Exception:
+        return []
+    out = []
+    for row in res.get("values", []) or []:
+        if row and str(row[0] or "").strip():
+            out.append(str(row[0]).strip())
+    return out
+
+
+def resolve_okd_project(
+    sheets_service,
+    spreadsheet_id: str,
+    input_name: str,
+) -> Resolution:
+    """Resolve OKD to an existing tracker OR one unique Open Projects entry.
+
+    Unlike operational processors, OKD may create tracker/task tabs, but only when
+    the intended project is independently present in the Open Projects registry.
+    """
+    existing = resolve_existing_tracker(
+        sheets_service,
+        spreadsheet_id,
+        input_name,
+    )
+    if existing.confirmed:
+        existing.method = "EXISTING_TRACKER_" + existing.method
+        return existing
+
+    original = str(input_name or "").strip()
+    key = normalize_project_key(original)
+    result = Resolution(
+        status="UNKNOWN",
+        input_name=original,
+        normalized_key=key,
+    )
+
+    if not key:
+        result.status = "CONFLICT"
+        result.method = "BLANK_PROJECT"
+        result.conflicts.append("OKD project name is blank after normalization.")
+        return result
+
+    names = _open_project_names(sheets_service, spreadsheet_id)
+    exact = [name for name in names if normalize_project_key(name) == key]
+
+    if len(exact) == 1:
+        project = strip_context(exact[0]).strip()
+        result.status = "CONFIRMED"
+        result.canonical_project = project
+        result.tracker_title = project + TRACKER_SUFFIX
+        result.method = "OPEN_PROJECTS_REGISTRY"
+        result.reasons.append(
+            "No tracker exists yet, but the project uniquely matches Open Projects."
+        )
+        return result
+
+    if len(exact) > 1:
+        result.status = "CONFLICT"
+        result.method = "OPEN_PROJECTS_COLLISION"
+        result.conflicts.append(
+            "More than one Open Projects entry normalizes to the same project identity."
+        )
+        result.suggestions = [(name, 1.0) for name in exact]
+        return result
+
+    # Fuzzy suggestions are still review-only for project creation.
+    scored = []
+    for name in names:
+        score = difflib.SequenceMatcher(
+            None, key, normalize_project_key(name)
+        ).ratio()
+        if score >= FUZZY_SUGGESTION_MIN:
+            scored.append((score, name))
+    scored.sort(reverse=True)
+
+    if scored:
+        result.status = "REVIEW"
+        result.method = "OPEN_PROJECTS_FUZZY_SUGGESTION"
+        result.suggestions = [(name, round(score, 3)) for score, name in scored[:5]]
+        result.reasons.append(
+            "A similar Open Projects entry exists, but spelling similarity cannot create a project."
+        )
+
+    return result
