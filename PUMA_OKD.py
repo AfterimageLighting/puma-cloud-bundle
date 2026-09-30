@@ -9,6 +9,7 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from openpyxl import load_workbook
+from puma_project_resolver import resolve_okd_project, clean_subject_project
 
 # ============================ Config ============================
 SPREADSHEET_ID = '1pwVlYSGVjyTCLt4GT7xU2TCnxfdJuxAbp_jU6Snisls'
@@ -209,10 +210,9 @@ def get_and_process_emails_single(gmail_service, message_ref):
         headers = payload.get("headers", [])
         subject = next((h["value"] for h in headers if h["name"] == "Subject"), "")
 
-        # We already filtered by the OKD labelId, so don't subject-gate.
-        # Just normalize the subject (strip "Re:" / "Fwd:") and extract the project name.
-        clean = re.sub(r'^(?:re|fwd?|fw)\s*:\s*', '', subject or '', flags=re.I).strip()
-        project_name = clean.split(" - ", 1)[1] if " - " in clean else clean
+        # OKD is the one flow allowed to create a new project, but the subject
+        # still must resolve against an existing tracker or Open Projects entry.
+        project_name = clean_subject_project(subject, ["OKD", "Okay to Design"])
 
         parsed = []
 
@@ -242,8 +242,7 @@ def get_and_process_emails_single(gmail_service, message_ref):
                 rows = _read_master_sheet_csv(file_data, project_name, filename)
             parsed.extend(rows)
 
-        gmail_service.users().messages().modify(userId="me", id=message_ref["id"], body={"removeLabelIds": ["UNREAD"]}).execute()
-        print(f"Processed {len(parsed)} row(s) from: {subject}")
+        print(f"Parsed {len(parsed)} row(s) from: {subject}")
         return project_name, parsed
 
     except HttpError as e:
@@ -517,10 +516,40 @@ if __name__ == '__main__':
         if messages:
             for m in messages:
                 try:
-                    project_name, rows = get_and_process_emails_single(gmail_service, m)
-                    if project_name is None:
+                    project_guess, rows = get_and_process_emails_single(gmail_service, m)
+                    if project_guess is None:
                         continue
+
+                    resolution = resolve_okd_project(
+                        sheets_service,
+                        SPREADSHEET_ID,
+                        project_guess,
+                    )
+
+                    if not resolution.confirmed:
+                        if DEBUG:
+                            print(
+                                f"[OKD] PROJECT {resolution.status}: {project_guess} "
+                                f"method={resolution.method} suggestions={resolution.suggestions}"
+                            )
+                        # Do not create tabs and leave unread for review.
+                        continue
+
+                    project_name = resolution.canonical_project
+
+                    # Ensure every imported row uses the confirmed canonical name.
+                    for row in rows:
+                        row["Project"] = project_name
+
                     update_google_sheet(sheets_service, project_name, rows)
+
+                    # Only mark the email read after the confirmed project has been
+                    # successfully created/updated.
+                    gmail_service.users().messages().modify(
+                        userId="me",
+                        id=m["id"],
+                        body={"removeLabelIds": ["UNREAD"]}
+                    ).execute()
                 except Exception as e:
                     print(f"Error processing a message; continuing. Details: {e}")
     print("PUMA automation script finished.")
