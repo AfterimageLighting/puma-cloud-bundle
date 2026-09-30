@@ -9,6 +9,7 @@ from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
 from google.auth.exceptions import RefreshError
+from puma_project_resolver import resolve_existing_tracker
 
 # (lightweight parsing helper – keep whatever you already use)
 try:
@@ -276,11 +277,16 @@ def normalize_po_number(po: str, fname: str) -> str:
 
 
 def project_from_subject(subject: str) -> str:
-    # very light — keep your own logic if you have it
+    """Extract the likely project portion of a QuickBooks PO subject."""
     s = subject or ""
-    # try to remove leading "RE:" / "FWD:"
-    s = s.replace("RE: ", "").replace("Re: ", "").replace("Fwd: ", "").replace("FWD: ", "")
-    return s.strip() or "PO"
+    s = re.sub(r"^(?:re|fwd?|fw)\s*:\s*", "", s, flags=re.I).strip()
+    # Common format: "Purchase Order PO-2023 - Compton"
+    if " - " in s:
+        return s.split(" - ")[-1].strip()
+    # Remove leading purchase-order wording / PO number when possible.
+    s = re.sub(r"(?i)^purchase\s+order\s*", "", s).strip()
+    s = re.sub(r"(?i)^PO[-_ ]?\d+\s*", "", s).strip(" -:")
+    return s
 
 
 # ===================== CORE PROCESSING =====================
@@ -294,8 +300,40 @@ def process_thread(gmail, drive, sheets, thread: Dict[str,Any],
         return
 
     first_subject = msg_subject(messages[0]) or "PO"
-    project_name  = project_from_subject(first_subject)
+    project_guess = project_from_subject(first_subject)
     when = _dt.datetime.now().isoformat(timespec="seconds")
+
+    resolution = resolve_existing_tracker(
+        sheets,
+        SPREADSHEET_ID,
+        project_guess,
+    )
+
+    if not resolution.confirmed:
+        # PO cloud processing is a filing/logging step. It must not create a
+        # project folder from an unconfirmed email subject.
+        append_rows(
+            sheets,
+            TAB_UNMATCHED,
+            [[
+                when,
+                project_guess,
+                first_subject,
+                "",
+                "",
+                "",
+                f"Project resolution {resolution.status} ({resolution.method}); no upload performed",
+            ]]
+        )
+        dprint(
+            "[PO] Project unresolved:",
+            project_guess,
+            resolution.status,
+            resolution.suggestions,
+        )
+        return
+
+    project_name = resolution.canonical_project
     project_folder_id = _ensure_subfolder(drive, parent_folder_id, project_name[:80])
 
     matched_rows, unmatched_rows = [], []

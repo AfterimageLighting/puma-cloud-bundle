@@ -1,6 +1,7 @@
 # PUMA4_RFPO.py — RFPO parser (email body + PDF attachments) with signature cut-off + allocator mode + table-gated PDF parsing
 import os, re, base64, datetime, html, io, sys
 from typing import List, Tuple, Dict, Optional
+from puma_project_resolver import resolve_subject_to_existing_tracker
 
 # ============================ Config ============================
 SPREADSHEET_ID = '1pwVlYSGVjyTCLt4GT7xU2TCnxfdJuxAbp_jU6Snisls'
@@ -81,17 +82,18 @@ def _header_index_map(headers: List[str]) -> Dict[str, int]:
         elif t == "status": idx["Status"] = i
     return idx
 
-def _ensure_tracker_tabs(sheets, project_name: str) -> Tuple[str, Dict[str, int]]:
-    tab = f"{project_name} - Project Tracker"
+def _load_existing_tracker(sheets, tracker_tab: str) -> Tuple[str, Dict[str, int]]:
+    """Load a CONFIRMED existing tracker. Never creates a project tab."""
     meta = sheets.spreadsheets().get(spreadsheetId=SPREADSHEET_ID).execute()
-    titles = {s['properties']['title']: s['properties']['sheetId'] for s in meta.get('sheets', [])}
-    if tab not in titles:
-        sheets.spreadsheets().batchUpdate(spreadsheetId=SPREADSHEET_ID, body={'requests':[{'addSheet':{'properties':{'title':tab}}}]}).execute()
-    headers = [["Project","Source","Type","Part Number","Manufacturer","Quantity","Status","PO Number","Estimated Ship Date (ESD)"]]
-    sheets.spreadsheets().values().update(spreadsheetId=SPREADSHEET_ID, range=f"{tab}!A1:I1",
-        valueInputOption='RAW', body={'values': headers}).execute()
-    hdr = sheets.spreadsheets().values().get(spreadsheetId=SPREADSHEET_ID, range=f"{tab}!1:1").execute().get("values", [[]])[0]
-    return tab, _header_index_map(hdr)
+    titles = {s['properties']['title'] for s in meta.get('sheets', [])}
+    if tracker_tab not in titles:
+        raise RuntimeError(f"Confirmed tracker no longer exists: {tracker_tab}")
+
+    hdr = sheets.spreadsheets().values().get(
+        spreadsheetId=SPREADSHEET_ID,
+        range=f"'{tracker_tab}'!1:1"
+    ).execute().get("values", [[]])[0]
+    return tracker_tab, _header_index_map(hdr)
 
 def _ensure_unmatched_tab(sheets) -> str:
     tab = "RFPO Unmatched"
@@ -256,8 +258,8 @@ def parse_rfpo_items_from_pdf_bytes(b: bytes) -> List[Tuple[int, str]]:
     return items
 
 # ============================ Sheets logic ============================
-def approve_parts_by_project(sheets, project: str, subject: str, items: List[Tuple[int,str]]):
-    tracker_tab, idx = _ensure_tracker_tabs(sheets, project)
+def approve_parts_by_project(sheets, tracker_tab: str, project: str, subject: str, items: List[Tuple[int,str]]):
+    tracker_tab, idx = _load_existing_tracker(sheets, tracker_tab)
     unmatched_tab = _ensure_unmatched_tab(sheets)
 
     res = sheets.spreadsheets().values().get(spreadsheetId=SPREADSHEET_ID, range=f"{tracker_tab}!A2:I").execute()
@@ -336,7 +338,6 @@ if __name__ == "__main__":
     for m in msgs:
         try:
             subject, bodies, atts = _get_subject_bodies_attachments(gmail, m["id"])
-            project = subject.split(" - ", 1)[1].strip() if " - " in subject else subject.strip()
 
             items = parse_rfpo_items_from_bodies(bodies)
 
@@ -353,12 +354,41 @@ if __name__ == "__main__":
                 merged[part] = merged.get(part, 0) + int(qty)
             items = [(q, p) for p, q in merged.items()]
 
+            if not items:
+                if DEBUG:
+                    print(f"[RFPO] REVIEW: no parsable line items in {subject}")
+                continue
+
+            resolution = resolve_subject_to_existing_tracker(
+                sheets,
+                SPREADSHEET_ID,
+                subject,
+                ["RFPO", "Request for Purchase Order"],
+                parts=[p for _, p in items],
+            )
+
+            if not resolution.confirmed:
+                if DEBUG:
+                    print(
+                        f"[RFPO] PROJECT {resolution.status}: {subject} "
+                        f"method={resolution.method} suggestions={resolution.suggestions}"
+                    )
+                # No tracker creation and no approvals. Leave unread for review.
+                continue
+
+            project = resolution.canonical_project
+            tracker_tab = resolution.tracker_title
+
             if DEBUG:
-                print(f"[RFPO] {subject} -> {project} :: {len(items)} unique item(s)")
+                print(f"[RFPO] {subject} -> {tracker_tab} :: {len(items)} unique item(s)")
                 for q, p in items: print(f"   - ({q}) {p}")
 
-            approve_parts_by_project(sheets, project, subject, items)
-            gmail.users().messages().modify(userId="me", id=m["id"], body={"removeLabelIds": ["UNREAD"]}).execute()
+            approve_parts_by_project(sheets, tracker_tab, project, subject, items)
+            gmail.users().messages().modify(
+                userId="me",
+                id=m["id"],
+                body={"removeLabelIds": ["UNREAD"]}
+            ).execute()
         except Exception as e:
             print(f"[RFPO] Error processing message {m.get('id')}: {e}")
     print("PUMA4_RFPO complete.")
