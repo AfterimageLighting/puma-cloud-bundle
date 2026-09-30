@@ -73,7 +73,7 @@ def list_rr_messages(gmail):
     msgs = []
     req = gmail.users().messages().list(
         userId="me",
-        labelIds=[resolve_label_id(gmail, "PUMA - RR")]
+        labelIds=[resolve_label_id(gmail, "PUMA - RR")],
         q="is:unread has:attachment",
         maxResults=50
     )
