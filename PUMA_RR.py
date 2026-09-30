@@ -6,6 +6,7 @@
 
 import os, re, io, sys, base64, datetime
 from typing import List, Tuple, Dict
+from puma_project_resolver import resolve_subject_to_existing_tracker
 
 SPREADSHEET_ID = '1pwVlYSGVjyTCLt4GT7xU2TCnxfdJuxAbp_jU6Snisls'
 RR_BASE_FOLDER_ID = "1ZpATQXv7owmljEpLYrTvpuHgNU8nSPxC"
@@ -126,35 +127,19 @@ def project_from_subject(subject: str) -> str:
 def _fetch_sheets_meta(sheets):
     return sheets.spreadsheets().get(spreadsheetId=SPREADSHEET_ID).execute().get("sheets", [])
 
-def _existing_project_tabs(sheets):
-    return [sh["properties"]["title"] for sh in _fetch_sheets_meta(sheets) if sh["properties"]["title"].endswith(" - Project Tracker")]
+def get_tracker_snapshot(sheets, tab_title):
+    """Load one CONFIRMED existing tracker. Never creates or fuzzy-selects a tab."""
+    titles = {
+        sh["properties"]["title"]
+        for sh in _fetch_sheets_meta(sheets)
+    }
+    if tab_title not in titles:
+        raise RuntimeError(f"Confirmed tracker no longer exists: {tab_title}")
 
-def _best_project_title(sheets, guess_project: str) -> str:
-    import difflib
-    candidates = _existing_project_tabs(sheets)
-    if not candidates: return f"{guess_project} - Project Tracker"
-    def base(t): return t[:-len(" - Project Tracker")].strip()
-    guess = guess_project.strip(); gl = guess.lower()
-    for t in candidates:
-        if base(t).lower() == gl: return t
-    containers = [t for t in candidates if gl in base(t).lower() or base(t).lower() in gl]
-    if containers: return max(containers, key=lambda t: len(base(t)))
-    scores = [(difflib.SequenceMatcher(None, base(t).lower(), gl).ratio(), t) for t in candidates]
-    best_score, best_title = max(scores, key=lambda x: x[0])
-    return best_title if best_score >= 0.60 else f"{guess_project} - Project Tracker"
+    hdr = sheets.spreadsheets().values().get(
+        spreadsheetId=SPREADSHEET_ID, range=f"'{tab_title}'!1:1"
+    ).execute().get("values", [[]])[0]
 
-def ensure_tracker_tab(sheets, project_guess):
-    target_title = _best_project_title(sheets, project_guess)
-    meta = _fetch_sheets_meta(sheets)
-    titles = {s['properties']['title']: s['properties']['sheetId'] for s in meta}
-    if target_title not in titles:
-        sheets.spreadsheets().batchUpdate(spreadsheetId=SPREADSHEET_ID,
-            body={'requests':[{'addSheet':{'properties':{'title':target_title}}}]}).execute()
-    headers = [["Project","Source","Type","Part Number","Manufacturer","Quantity","Status","PO Number","Estimated Ship Date (ESD)","Date Received"]]
-    sheets.spreadsheets().values().update(
-        spreadsheetId=SPREADSHEET_ID, range=f"{target_title}!A1:J1",
-        valueInputOption='RAW', body={'values': headers}).execute()
-    hdr = sheets.spreadsheets().values().get(spreadsheetId=SPREADSHEET_ID, range=f"{target_title}!1:1").execute().get("values", [[]])[0]
     idx = {}
     def _lnorm(x): return (str(x or "")).strip().lower()
     for i, h in enumerate(hdr):
@@ -168,21 +153,22 @@ def ensure_tracker_tab(sheets, project_guess):
         elif "estimated ship" in t or "esd" in t or "ship date" in t: idx["ESD"] = i
         elif (("date" in t and "receive" in t) or t.startswith("receiving rep") or t.startswith("receiving report") or t == "rr" or "rr link" in t):
             idx["RR Link"] = i
-    return target_title, idx
 
-def get_tracker_snapshot(sheets, project_guess):
-    tab, idx = ensure_tracker_tab(sheets, project_guess)
-    res = sheets.spreadsheets().values().get(spreadsheetId=SPREADSHEET_ID, range=f"{tab}!A2:J").execute()
+    res = sheets.spreadsheets().values().get(
+        spreadsheetId=SPREADSHEET_ID, range=f"'{tab_title}'!A2:J"
+    ).execute()
     values = res.get("values", [])
     pn_col = idx.get("Part Number")
     part_to_rows: Dict[str, List[int]] = {}
     for r, row in enumerate(values):
         pn = (str(row[pn_col]).strip() if pn_col is not None and pn_col < len(row) else "")
-        if pn: part_to_rows.setdefault(pn, []).append(r)
+        if pn:
+            part_to_rows.setdefault(pn, []).append(r)
+
     if DEBUG:
-        print(f"[RR] Using tracker tab: {tab}")
+        print(f"[RR] Using confirmed tracker tab: {tab_title}")
         print(f"[RR] Tracker dictionary loaded: {len(part_to_rows)} PNs")
-    return tab, idx, values, part_to_rows
+    return tab_title, idx, values, part_to_rows
 
 def ensure_unmatched_tab(sheets):
     tab = "RR Unmatched"
@@ -395,26 +381,59 @@ if __name__ == "__main__":
     for m in msgs:
         try:
             subject, atts, email_dt = get_subject_attachments_timestamp(gmail, m["id"])
-            guess_project = project_from_subject(subject)
-            tab_title, idx, values, part_to_rows = get_tracker_snapshot(sheets, guess_project)
-            canon_to_rows = canon_map(part_to_rows)
 
-            proj_name = tab_title[:-len(" - Project Tracker")] if tab_title.endswith(" - Project Tracker") else tab_title
-            project_folder_id = get_or_create_child_folder(drive, RR_BASE_FOLDER_ID, proj_name)
-
-            file_link = None
+            # Parse evidence BEFORE choosing a project or writing/uploading anything.
             items: List[Tuple[int, str]] = []
+            pdf_attachments = []
             for fname, data in atts:
-                if not fname.lower().endswith(".pdf"): continue
+                if not fname.lower().endswith(".pdf"):
+                    continue
                 parsed_items = parse_rr_pdf_summary(data)
                 if parsed_items:
-                    _, link = upload_pdf_to_drive(drive, project_folder_id, f"{proj_name} - {fname}".replace("/", "-"), data, MAKE_LINK_PUBLIC)
-                    file_link = file_link or link
+                    pdf_attachments.append((fname, data))
                     items.extend(parsed_items)
 
             if not items:
-                if DEBUG: print("[RR] Skipping email: PDF didn’t yield any line items.")
+                if DEBUG:
+                    print("[RR] Skipping email: PDF didn't yield any line items.")
+                # Leave unread so a human can review/re-send.
                 continue
+
+            resolution = resolve_subject_to_existing_tracker(
+                sheets,
+                SPREADSHEET_ID,
+                subject,
+                ['Receiving Report', 'RR'],
+                parts=[pn for _, pn in items],
+            )
+
+            if not resolution.confirmed:
+                if DEBUG:
+                    print(
+                        f"[RR] PROJECT {resolution.status}: {subject} "
+                        f"method={resolution.method} suggestions={resolution.suggestions}"
+                    )
+                # Critical safety behavior: no tracker creation, no status write,
+                # no report upload, and leave the email unread for review.
+                continue
+
+            tab_title = resolution.tracker_title
+            tab_title, idx, values, part_to_rows = get_tracker_snapshot(sheets, tab_title)
+            canon_to_rows = canon_map(part_to_rows)
+
+            proj_name = resolution.canonical_project
+            project_folder_id = get_or_create_child_folder(drive, RR_BASE_FOLDER_ID, proj_name)
+
+            file_link = None
+            for fname, data in pdf_attachments:
+                _, link = upload_pdf_to_drive(
+                    drive,
+                    project_folder_id,
+                    f"{proj_name} - {fname}".replace("/", "-"),
+                    data,
+                    MAKE_LINK_PUBLIC,
+                )
+                file_link = file_link or link
 
             if DEBUG:
                 print(f"[RR] {subject} -> {tab_title} :: {len(items)} detected item(s); Link={'yes' if file_link else 'no'}")
