@@ -5,7 +5,7 @@ import os, re, io, sys, base64, datetime
 from typing import List, Tuple, Dict
 from puma_project_resolver import resolve_subject_to_existing_tracker
 
-SPREADSHEET_ID = '1pwVlYSGVjyTCLt4GT7xU2TCnxfdJuxAbp_jU6Snisls'
+SPREADSHEET_ID = os.getenv('PUMA_SPREADSHEET_ID', '1pwVlYSGVjyTCLt4GT7xU2TCnxfdJuxAbp_jU6Snisls').strip()
 
 def resolve_label_id(gmail, label_name: str) -> str:
     """Return Gmail labelId for a visible label name."""
@@ -20,7 +20,7 @@ def list_dr_messages(gmail):
     messages = []
     request = gmail.users().messages().list(
         userId="me",
-        labelIds=[resolve_label_id(gmail, "PUMA - DR")],
+        labelIds=[resolve_label_id(gmail, os.getenv('PUMA_DR_LABEL_NAME', 'PUMA - DR'))],
         q="is:unread has:attachment",            # keep it unread + attachment
         maxResults=50
     )
