@@ -7,6 +7,7 @@
 
 import os, re, io, sys, base64, datetime
 from typing import List, Tuple, Dict
+from puma_project_resolver import resolve_subject_to_existing_tracker
 
 SPREADSHEET_ID = '1pwVlYSGVjyTCLt4GT7xU2TCnxfdJuxAbp_jU6Snisls'
 
@@ -166,52 +167,30 @@ def _header_index_map(headers):
 def _fetch_sheets_meta(sheets):
     return sheets.spreadsheets().get(spreadsheetId=SPREADSHEET_ID).execute().get("sheets", [])
 
-def _existing_project_tabs(sheets):
-    tabs = []
-    for sh in _fetch_sheets_meta(sheets):
-        title = sh["properties"]["title"]
-        if title.endswith(" - Project Tracker"):
-            tabs.append(title)
-    return tabs
+def get_tracker_snapshot(sheets, tab_title):
+    """Load a CONFIRMED existing tracker. Never creates or fuzzy-selects a tab."""
+    titles = {s["properties"]["title"] for s in _fetch_sheets_meta(sheets)}
+    if tab_title not in titles:
+        raise RuntimeError(f"Confirmed tracker no longer exists: {tab_title}")
 
-def _best_project_title(sheets, guess_project: str) -> str:
-    import difflib
-    candidates = _existing_project_tabs(sheets)
-    if not candidates:
-        return f"{guess_project} - Project Tracker"
-    def base(t): return t[:-len(" - Project Tracker")].strip().lower()
-    guess_base = guess_project.strip().lower()
-    scores = [(difflib.SequenceMatcher(None, base(t), guess_base).ratio(), t) for t in candidates]
-    best_score, best_title = max(scores, key=lambda x: x[0])
-    return best_title if best_score >= 0.70 else f"{guess_project} - Project Tracker"
+    hdr = sheets.spreadsheets().values().get(
+        spreadsheetId=SPREADSHEET_ID,
+        range=f"'{tab_title}'!1:1"
+    ).execute().get("values", [[]])[0]
+    idx = _header_index_map(hdr)
 
-def ensure_tracker_tab(sheets, project_guess):
-    target_title = _best_project_title(sheets, project_guess)
-    meta = _fetch_sheets_meta(sheets)
-    titles = {s['properties']['title']: s['properties']['sheetId'] for s in meta}
-    if target_title not in titles:
-        sheets.spreadsheets().batchUpdate(spreadsheetId=SPREADSHEET_ID,
-            body={'requests':[{'addSheet':{'properties':{'title':target_title}}}]}).execute()
-        # Only set headers when creating a new sheet
-        headers = [["Project","Source","Type","Part Number","Manufacturer","Quantity","Status","PO Number","Estimated Ship Date (ESD)","Date Received","Date Scheduled","Date Delivered"]]
-        sheets.spreadsheets().values().update(spreadsheetId=SPREADSHEET_ID, range=f"{target_title}!A1:L1",
-            valueInputOption='RAW', body={'values': headers}).execute()
-
-    # Read headers as they exist now
-    hdr = sheets.spreadsheets().values().get(spreadsheetId=SPREADSHEET_ID, range=f"{target_title}!1:1").execute().get("values", [[]])[0]
-    return target_title, _header_index_map(hdr)
-
-def get_tracker_snapshot(sheets, project_guess):
-    tab, idx = ensure_tracker_tab(sheets, project_guess)
-    # Read a broad range to include extra columns (through column L)
-    res = sheets.spreadsheets().values().get(spreadsheetId=SPREADSHEET_ID, range=f"{tab}!A2:L").execute()
+    res = sheets.spreadsheets().values().get(
+        spreadsheetId=SPREADSHEET_ID,
+        range=f"'{tab_title}'!A2:L"
+    ).execute()
     values = res.get("values", [])
     pn_col = idx.get("Part Number")
     part_to_rows: Dict[str, List[int]] = {}
     for r, row in enumerate(values):
         pn = _norm(row[pn_col]) if pn_col is not None and pn_col < len(row) else ""
-        if pn: part_to_rows.setdefault(pn, []).append(r)
-    return tab, idx, values, part_to_rows
+        if pn:
+            part_to_rows.setdefault(pn, []).append(r)
+    return tab_title, idx, values, part_to_rows
 
 def ensure_unmatched_tab(sheets):
     tab = "RFPS Unmatched"
@@ -360,15 +339,42 @@ if __name__ == "__main__":
     for m in msgs:
         try:
             subject, body, ts, email_link = get_subject_and_body(gmail, m["id"])
-            project_guess = project_from_subject(subject)
-            tab_title, idx, values, part_to_rows = get_tracker_snapshot(sheets, project_guess)
+
+            # Parse the requested items before choosing a tracker. Exact item
+            # evidence may confirm a misspelled/short project name.
+            items = parse_items(body)
+            if not items:
+                if DEBUG:
+                    print(f"[RFPS] REVIEW: no parsable line items in {subject}")
+                # Leave unread for manual review.
+                continue
+
+            resolution = resolve_subject_to_existing_tracker(
+                sheets,
+                SPREADSHEET_ID,
+                subject,
+                ["RFPS", "Request for Packing Slip", "Request for Packing Slips"],
+                parts=[pn for _, pn in items],
+            )
+
+            if not resolution.confirmed:
+                if DEBUG:
+                    print(
+                        f"[RFPS] PROJECT {resolution.status}: {subject} "
+                        f"method={resolution.method} suggestions={resolution.suggestions}"
+                    )
+                # No tracker creation and no status change when project identity
+                # is not confirmed. Leave unread for review.
+                continue
+
+            tab_title = resolution.tracker_title
+            tab_title, idx, values, part_to_rows = get_tracker_snapshot(sheets, tab_title)
 
             # Canon map for fast PN lookups
             canon_to_rows: Dict[str, List[int]] = {}
             for pn, rows in part_to_rows.items():
                 canon_to_rows.setdefault(canon(pn), []).extend(rows)
 
-            items = parse_items(body)
             if DEBUG:
                 print(f"[RFPS] {subject} -> {tab_title} :: parsed {len(items)} item(s)")
                 for q, pn in items: print(f"  - ({q}) {pn}")
