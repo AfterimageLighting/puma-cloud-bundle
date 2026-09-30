@@ -24,6 +24,7 @@ from googleapiclient.errors import HttpError
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
+from puma_project_resolver import resolve_subject_to_existing_tracker
 
 # ---------------------------------------------------------------------------
 # CONFIG / ENVs
@@ -316,9 +317,12 @@ def create_tracker_tab_if_missing(svc, titles_map: dict, project_name: str) -> i
     titles_map[tab_title] = new_id
     return new_id
 
-def apply_omissions_and_append(svc, titles_map, project_name, data_items, omit_pns, src_link, src_text):
-    tab = f"{project_name} - Project Tracker"
-    sheet_id = create_tracker_tab_if_missing(svc, titles_map, project_name)
+def apply_omissions_and_append(svc, titles_map, tracker_tab, project_name, data_items, omit_pns, src_link, src_text):
+    # RFA is an operational update. It may only modify a CONFIRMED existing tracker.
+    tab = tracker_tab
+    sheet_id = titles_map.get(tab)
+    if not sheet_id:
+        raise RuntimeError(f"Confirmed tracker no longer exists: {tab}")
 
     # Mark omissions by searching col D
     if omit_pns:
@@ -406,16 +410,8 @@ def process_message(gmail, sheets, msg_ref):
         # Still mark as processed? No — skip entirely so team can adjust subject if needed.
         return
 
-    # Project name heuristics
-    project_name = subject
-    if " - " in subject:
-        project_name = subject.split(" - ", 1)[1].strip()
-    elif " – " in subject:
-        project_name = subject.split(" – ", 1)[1].strip()
-
     src_link = gmail_link_from_headers(headers, msg.get("threadId"))
     date_hdr = next((h["value"] for h in headers if h["name"] == "Date"), "")
-    src_text = f"RFA – {project_name} {date_hdr}".strip()
 
     parsed_items, omit_pns = [], []
 
@@ -466,8 +462,44 @@ def process_message(gmail, sheets, msg_ref):
             "Manufacturer": it.get("Manufacturer",""),
         })
 
-    # Update Sheets (create tab if missing)
-    apply_omissions_and_append(sheets, TITLES_MAP, project_name, norm_items, list(set(omit_pns)), src_link, src_text)
+    evidence_parts = [
+        it.get("Part Number", "")
+        for it in norm_items
+        if it.get("Part Number", "")
+    ] + list(set(omit_pns))
+
+    resolution = resolve_subject_to_existing_tracker(
+        sheets,
+        SPREADSHEET_ID,
+        subject,
+        ["RFA", "Request for Adder", "Request for Adders"],
+        parts=evidence_parts,
+    )
+
+    if not resolution.confirmed:
+        if DEBUG:
+            print(
+                f"[RFA] PROJECT {resolution.status}: {subject} "
+                f"method={resolution.method} suggestions={resolution.suggestions}"
+            )
+        # Do not create a tracker, do not omit/append rows, and do not mark
+        # processed. Leave the message available for human review.
+        return
+
+    project_name = resolution.canonical_project
+    tracker_tab = resolution.tracker_title
+    src_text = f"RFA – {project_name} {date_hdr}".strip()
+
+    apply_omissions_and_append(
+        sheets,
+        TITLES_MAP,
+        tracker_tab,
+        project_name,
+        norm_items,
+        list(set(omit_pns)),
+        src_link,
+        src_text,
+    )
 
     # Mark read + processed so we never touch it again
     gmail.users().messages().modify(
