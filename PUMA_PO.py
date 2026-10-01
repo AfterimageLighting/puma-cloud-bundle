@@ -10,6 +10,7 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
 from google.auth.exceptions import RefreshError
 from puma_project_resolver import resolve_existing_tracker
+from puma_runtime_config import required_env, test_safe_env, LIVE_PUMA_SPREADSHEET_ID
 
 # (lightweight parsing helper – keep whatever you already use)
 try:
@@ -26,13 +27,13 @@ SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
 ]
 
-DEFAULT_LABEL_VISIBLE_NAME = os.getenv("PUMA_PO_LABEL_NAME", "PUMA/PUMA - PO").strip()
+DEFAULT_LABEL_VISIBLE_NAME = test_safe_env("PUMA_PO_LABEL_NAME", "PUMA/PUMA - PO")
 TAB_MATCHED   = "PO Matched"
 TAB_UNMATCHED = "PO Unmatched"
 
 # Drive folder + sheet id from env (with sanitizer)
-PROJECTS_FOLDER_ID = os.getenv("PUMA_PO_DRIVE_FOLDER_ID", "")
-RAW_SPREADSHEET_ID = os.getenv("PUMA_SPREADSHEET_ID", "")
+PROJECTS_FOLDER_ID = required_env("PUMA_PO_DRIVE_FOLDER_ID")
+RAW_SPREADSHEET_ID = required_env("PUMA_SPREADSHEET_ID", LIVE_PUMA_SPREADSHEET_ID)
 # Remove any stray angle brackets or whitespace that may have been pasted
 SPREADSHEET_ID     = re.sub(r"[<>\s]", "", RAW_SPREADSHEET_ID)
 MAKE_LINK_PUBLIC   = False
