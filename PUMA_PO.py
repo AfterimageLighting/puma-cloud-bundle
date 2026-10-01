@@ -200,18 +200,8 @@ def upload_blob_to_drive(drive, parent_id: str, name: str, data: bytes, mime: st
 
 
 def maybe_make_public(drive, file_id: str, public: bool = False):
-    if not public:
-        return
-    try:
-        drive.permissions().create(
-            fileId=file_id,
-            body={"type": "anyone", "role": "reader"},
-            fields="id",
-            supportsAllDrives=True
-        ).execute()
-    except Exception as e:
-        dprint("make_public failed:", e)
-
+    if public:
+        raise RuntimeError("Public Drive sharing is disabled for PUMA uploads.")
 
 def append_rows(sheets, tab: str, rows: List[List[Any]]):
     if not rows:
