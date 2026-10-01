@@ -3,6 +3,7 @@ import os, re, base64, datetime, html, io, sys
 from typing import List, Tuple, Dict, Optional
 from puma_project_resolver import resolve_subject_to_existing_tracker
 from puma_runtime_config import test_safe_env
+from puma_google_auth import load_google_user_credentials
 
 # ============================ Config ============================
 SPREADSHEET_ID = test_safe_env('PUMA_SPREADSHEET_ID', '1pwVlYSGVjyTCLt4GT7xU2TCnxfdJuxAbp_jU6Snisls')
@@ -36,30 +37,14 @@ ALLOCATE_BY_QTY = True   # True = allocate qty across duplicate parts; False = a
 import pdfplumber
 
 # ============================ Google auth/services ============================
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 def setup_services():
-    creds = None
-    if os.path.exists('token.json'):
-        creds = Credentials.from_authorized_user_file('token.json', SCOPES)
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            if not os.path.exists('client_secrets.json'):
-                print("Error: 'client_secrets.json' not found.")
-                return None, None
-            flow = InstalledAppFlow.from_client_secrets_file('client_secrets.json', SCOPES)
-            creds = flow.run_local_server(port=0)
-        with open('token.json', 'w') as token:
-            token.write(creds.to_json())
     try:
+        creds = load_google_user_credentials(SCOPES)
         return build('gmail', 'v1', credentials=creds), build('sheets', 'v4', credentials=creds)
-    except HttpError as e:
+    except Exception as e:
         print(f"Auth error: {e}")
         return None, None
 

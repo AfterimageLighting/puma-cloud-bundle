@@ -21,12 +21,10 @@ import pandas as pd  # needs openpyxl
 
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
-from google.auth.transport.requests import Request
 from puma_project_resolver import resolve_subject_to_existing_tracker
 from puma_runtime_config import required_env, test_safe_env, LIVE_PUMA_SPREADSHEET_ID
 from puma_status import can_auto_omit
+from puma_google_auth import load_google_user_credentials
 
 # ---------------------------------------------------------------------------
 # CONFIG / ENVs
@@ -56,20 +54,12 @@ PROCESSED_LABEL_ID = None
 # AUTH
 # ---------------------------------------------------------------------------
 
-def _load_creds(token_file="token.json", client_secret="credentials.json"):
-    creds = None
-    if os.path.exists(token_file):
-        creds = Credentials.from_authorized_user_file(token_file, SCOPES)
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            if DEBUG: print("[RFA] Refreshing credentials…")
-            creds.refresh(Request())
-        else:
-            flow = InstalledAppFlow.from_client_secrets_file(client_secret, SCOPES)
-            creds = flow.run_local_server(port=0)
-        with open(token_file, "w") as token:
-            token.write(creds.to_json())
-    return creds
+def _load_creds(token_file="token.json", client_secret="client_secrets.json"):
+    return load_google_user_credentials(
+        SCOPES,
+        token_file=token_file,
+        client_secret_file=client_secret,
+    )
 
 def gmail_service():
     return build("gmail", "v1", credentials=_load_creds())

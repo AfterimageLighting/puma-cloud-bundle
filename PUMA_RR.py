@@ -8,6 +8,7 @@ import os, re, io, sys, base64, datetime
 from typing import List, Tuple, Dict
 from puma_project_resolver import resolve_subject_to_existing_tracker
 from puma_runtime_config import test_safe_env
+from puma_google_auth import load_google_user_credentials
 from puma_status import can_advance_status, normalize_status
 
 SPREADSHEET_ID = test_safe_env('PUMA_SPREADSHEET_ID', '1pwVlYSGVjyTCLt4GT7xU2TCnxfdJuxAbp_jU6Snisls')
@@ -28,9 +29,6 @@ def resolve_label_id(gmail, label_name: str) -> str:
 # ---- deps ----
 import pdfplumber
 
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseUpload
@@ -44,26 +42,16 @@ SCOPES = [
 
 # ---------- Auth ----------
 def setup_services():
-    creds = None
-    if os.path.exists('token.json'):
-        creds = Credentials.from_authorized_user_file('token.json', SCOPES)
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            if not os.path.exists('client_secrets.json'):
-                print("Error: client_secrets.json not found."); return None, None, None
-            flow = InstalledAppFlow.from_client_secrets_file('client_secrets.json', SCOPES)
-            creds = flow.run_local_server(port=0)
-        with open('token.json', 'w') as f: f.write(creds.to_json())
     try:
+        creds = load_google_user_credentials(SCOPES)
         return (
             build('gmail', 'v1', credentials=creds),
             build('sheets', 'v4', credentials=creds),
             build('drive', 'v3', credentials=creds),
         )
-    except HttpError as e:
-        print(f"Auth error: {e}"); return None, None, None
+    except Exception as e:
+        print(f"Auth error: {e}")
+        return None, None, None
 
 # ---------- Gmail ----------
 def list_rr_messages(gmail):
@@ -196,8 +184,7 @@ def upload_pdf_to_drive(drive, parent_id: str, filename: str, data: bytes, make_
     media = MediaIoBaseUpload(io.BytesIO(data), mimetype="application/pdf", resumable=False)
     f = drive.files().create(body=body, media_body=media, fields="id, webViewLink", supportsAllDrives=True).execute()
     if make_public:
-        drive.permissions().create(fileId=f["id"], body={"role":"reader","type":"anyone"}, supportsAllDrives=True).execute()
-        f = drive.files().get(fileId=f["id"], fields="id, webViewLink", supportsAllDrives=True).execute()
+        raise RuntimeError("Public Drive sharing is disabled for PUMA uploads.")
     return f["id"], f["webViewLink"]
 
 # ---------- Canonicalization ----------

@@ -11,6 +11,7 @@ from googleapiclient.http import MediaIoBaseUpload
 from google.auth.exceptions import RefreshError
 from puma_project_resolver import resolve_existing_tracker
 from puma_runtime_config import required_env, test_safe_env, LIVE_PUMA_SPREADSHEET_ID
+from puma_google_auth import load_google_user_credentials
 
 # (lightweight parsing helper – keep whatever you already use)
 try:
@@ -64,30 +65,10 @@ def _build_services(creds: Credentials):
 
 
 def get_services() -> Tuple[Any, Any, Any]:
-    """
-    Prefer ENV client+refresh creds.
-    Fallback to token.json only if ENV is absent (legacy).
-    """
-    cid  = os.getenv("GMAIL_CLIENT_ID")
-    csec = os.getenv("GMAIL_CLIENT_SECRET")
-    rtok = os.getenv("GMAIL_REFRESH_TOKEN")
-
-    if cid and csec and rtok:
-        creds = Credentials(
-            None,
-            refresh_token=rtok,
-            client_id=cid,
-            client_secret=csec,
-            token_uri="https://oauth2.googleapis.com/token",
-            scopes=SCOPES,
-        )
-        print("[PO] Auth source: env | Gmail profile:", _whoami(creds))
-        return _build_services(creds)
-
-    # fallback (legacy)
+    """Build Gmail/Drive/Sheets services from the shared credential loader."""
     try:
-        creds = Credentials.from_authorized_user_file("token.json", SCOPES)
-        print("[PO] Auth source: token.json | Gmail profile:", _whoami(creds))
+        creds = load_google_user_credentials(SCOPES)
+        print("[PO] Auth source verified | Gmail profile:", _whoami(creds))
         return _build_services(creds)
     except Exception as e:
         raise SystemExit(f"[PO] FATAL: could not load credentials ({e})")
@@ -219,18 +200,8 @@ def upload_blob_to_drive(drive, parent_id: str, name: str, data: bytes, mime: st
 
 
 def maybe_make_public(drive, file_id: str, public: bool = False):
-    if not public:
-        return
-    try:
-        drive.permissions().create(
-            fileId=file_id,
-            body={"type": "anyone", "role": "reader"},
-            fields="id",
-            supportsAllDrives=True
-        ).execute()
-    except Exception as e:
-        dprint("make_public failed:", e)
-
+    if public:
+        raise RuntimeError("Public Drive sharing is disabled for PUMA uploads.")
 
 def append_rows(sheets, tab: str, rows: List[List[Any]]):
     if not rows:

@@ -8,6 +8,10 @@ from puma_runtime_config import TEST_MODE
 # If set to "1", Firestore is completely bypassed (useful for local runs).
 PUMA_DISABLE_LEASE = os.getenv("PUMA_DISABLE_LEASE") == "1"
 
+
+def _is_cloud_runtime() -> bool:
+    return bool(os.getenv("K_SERVICE"))
+
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -87,21 +91,21 @@ def _make_lease() -> object:
     """
     Return a lease object that supports acquire(lease_secs), heartbeat(extend_secs), release()
     Preference order:
-      1) No-op if PUMA_DISABLE_LEASE=1
-      2) Firestore if google-cloud-firestore is importable
-      3) No-op fallback
+      1) Explicit no-op only for local development when PUMA_DISABLE_LEASE=1
+      2) Firestore for Cloud/TEST and normal execution
+      3) Local-only no-op fallback if Firestore is unavailable
     """
     if PUMA_DISABLE_LEASE:
-        if TEST_MODE:
-            raise RuntimeError("PUMA_DISABLE_LEASE is not allowed in PUMA_TEST_MODE")
+        if TEST_MODE or _is_cloud_runtime():
+            raise RuntimeError("PUMA_DISABLE_LEASE is not allowed in Cloud/TEST runtime")
         return NoopLease()
     try:
         # Try to create a Firestore client; if it fails, fall back
         return FsLease()
     except Exception as e:
-        if TEST_MODE:
-            raise RuntimeError(f"Firestore lease unavailable in PUMA_TEST_MODE: {e}") from e
-        print(f"[LEASE] Firestore unavailable, using no-op lease: {e}", flush=True)
+        if TEST_MODE or _is_cloud_runtime():
+            raise RuntimeError(f"Firestore lease unavailable in Cloud/TEST runtime: {e}") from e
+        print(f"[LEASE] Firestore unavailable in local mode, using no-op lease: {e}", flush=True)
         return NoopLease()
 
 def run_with_lease(
@@ -127,14 +131,17 @@ def run_with_lease(
     try:
         acquired = lease.acquire(lease_secs=lease_secs)
     except Exception as e:
-        if TEST_MODE:
-            return {"ok": False, "skipped": False, "error": f"Lease acquire failed: {e}", "lease": "acquire-error"}
-        # Preserve production compatibility for now; production behavior should be
-        # intentionally changed only after isolated TEST validation.
-        print(f"[LEASE] acquire error, falling back to run anyway: {e}", flush=True)
-        result = do_work(run_id="fallback", holder="fallback")
+        if TEST_MODE or _is_cloud_runtime():
+            return {
+                "ok": False,
+                "skipped": False,
+                "error": f"Lease acquire failed: {e}",
+                "lease": "acquire-error",
+            }
+        print(f"[LEASE] local lease acquire error; running without Firestore lease: {e}", flush=True)
+        result = do_work(run_id="local-fallback", holder="local-fallback")
         inner_ok = result.get("ok", True) if isinstance(result, dict) else True
-        return {"ok": bool(inner_ok), "skipped": False, "result": result, "lease": "error-fallback"}
+        return {"ok": bool(inner_ok), "skipped": False, "result": result, "lease": "local-error-fallback"}
 
     if not acquired:
         return {"ok": True, "skipped": True, "reason": "busy"}
