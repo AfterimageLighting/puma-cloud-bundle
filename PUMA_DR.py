@@ -5,6 +5,7 @@ import os, re, io, sys, base64, datetime
 from typing import List, Tuple, Dict
 from puma_project_resolver import resolve_subject_to_existing_tracker
 from puma_runtime_config import test_safe_env
+from puma_status import can_advance_status, normalize_status
 
 SPREADSHEET_ID = test_safe_env('PUMA_SPREADSHEET_ID', '1pwVlYSGVjyTCLt4GT7xU2TCnxfdJuxAbp_jU6Snisls')
 
@@ -304,14 +305,16 @@ def apply_dr_to_tracker(sheets, project_tab, subject, email_dt, file_link, items
             return _ln(values[r][status_col]) if status_col is not None and status_col < len(values[r]) else ""
 
         remaining = qty
-        pending = [r for r in match_rows if status_of(r) not in {"delivered"}]
-        others  = [r for r in match_rows if r not in pending]
+        advancing = [
+            r for r in match_rows
+            if can_advance_status(status_of(r), "Delivered") and
+               normalize_status(status_of(r)) != "delivered"
+        ]
+        others = [r for r in match_rows if r not in advancing]
         rows_to_touch = []
-        for r in pending + others:
-            if remaining <= 0: break
-            if status_of(r) in {"delivered"}:
-                rows_to_touch.append(r)  # still drop the link
-                continue
+        for r in advancing + others:
+            if remaining <= 0:
+                break
             remaining -= row_qty_of(r)
             rows_to_touch.append(r)
 
@@ -320,9 +323,10 @@ def apply_dr_to_tracker(sheets, project_tab, subject, email_dt, file_link, items
             # Status -> Delivered
             if status_col is not None:
                 cur = status_of(r)
-                if cur != "delivered":
+                if can_advance_status(cur, "Delivered") and normalize_status(cur) != "delivered":
                     status_updates.append((r, "Delivered"))
-                    while len(values[r]) <= status_col: values[r].append("")
+                    while len(values[r]) <= status_col:
+                        values[r].append("")
                     values[r][status_col] = "Delivered"
 
             # Date Delivered -> hyperlink

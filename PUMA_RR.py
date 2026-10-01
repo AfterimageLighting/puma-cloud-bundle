@@ -8,6 +8,7 @@ import os, re, io, sys, base64, datetime
 from typing import List, Tuple, Dict
 from puma_project_resolver import resolve_subject_to_existing_tracker
 from puma_runtime_config import test_safe_env
+from puma_status import can_advance_status, normalize_status
 
 SPREADSHEET_ID = test_safe_env('PUMA_SPREADSHEET_ID', '1pwVlYSGVjyTCLt4GT7xU2TCnxfdJuxAbp_jU6Snisls')
 RR_BASE_FOLDER_ID = test_safe_env('PUMA_RR_BASE_FOLDER_ID', '1ZpATQXv7owmljEpLYrTvpuHgNU8nSPxC')
@@ -317,14 +318,16 @@ def apply_rr_to_tracker(sheets, project_tab, subject, email_dt, file_link, items
             return _ln(values[r][status_col]) if status_col is not None and status_col < len(values[r]) else ""
 
         remaining = qty
-        pending = [r for r in match_rows if status_of(r) not in {"received","delivered"}]
-        others  = [r for r in match_rows if r not in pending]
+        advancing = [
+            r for r in match_rows
+            if can_advance_status(status_of(r), "Received") and
+               normalize_status(status_of(r)) != "received"
+        ]
+        others = [r for r in match_rows if r not in advancing]
         rows_to_touch = []
-        for r in pending + others:
-            if remaining <= 0: break
-            if status_of(r) in {"received","delivered"}:
-                rows_to_touch.append(r)  # still drop the link
-                continue
+        for r in advancing + others:
+            if remaining <= 0:
+                break
             remaining -= row_qty_of(r)
             rows_to_touch.append(r)
 
@@ -333,7 +336,7 @@ def apply_rr_to_tracker(sheets, project_tab, subject, email_dt, file_link, items
             # Status -> Received (unless already Delivered)
             if status_col is not None:
                 cur = status_of(r)
-                if cur != "delivered":
+                if can_advance_status(cur, "Received") and normalize_status(cur) != "received":
                     status_updates.append((r, "Received"))
                     # also reflect in local cache so later items see the change
                     while len(values[r]) <= status_col: values[r].append("")
