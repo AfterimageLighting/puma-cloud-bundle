@@ -139,5 +139,16 @@ jobs:
           if 'master = "PUMA_Master_v2.py"' not in entry or 'else "PUMA_Master.py"' in entry:
               raise SystemExit("Cloud entrypoint can still fall back to legacy master.")
 
-          print("Cloud/Test auth and orchestrator entrypoints are non-interactive and consolidated.")
+          for path in ["PUMA_PO.py", "PUMA_RR.py", "PUMA_DR.py"]:
+              text = Path(path).read_text(encoding="utf-8")
+              if 'permissions().create' in text or '"type":"anyone"' in text or '"type": "anyone"' in text:
+                  raise SystemExit(f"Public Drive sharing capability remains in {path}")
+
+          lease = Path("lease.py").read_text(encoding="utf-8")
+          if "TEST_MODE or _is_cloud_runtime()" not in lease:
+              raise SystemExit("Cloud lease logic is not fail-closed.")
+          if '"lease": "error-fallback"' in lease:
+              raise SystemExit("Cloud lease error fallback can still run work without Firestore.")
+
+          print("Cloud/Test auth, Drive sharing, lease, and orchestrator invariants are consolidated.")
           PY
