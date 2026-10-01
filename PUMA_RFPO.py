@@ -2,9 +2,10 @@
 import os, re, base64, datetime, html, io, sys
 from typing import List, Tuple, Dict, Optional
 from puma_project_resolver import resolve_subject_to_existing_tracker
+from puma_runtime_config import test_safe_env
 
 # ============================ Config ============================
-SPREADSHEET_ID = os.getenv('PUMA_SPREADSHEET_ID', '1pwVlYSGVjyTCLt4GT7xU2TCnxfdJuxAbp_jU6Snisls').strip()
+SPREADSHEET_ID = test_safe_env('PUMA_SPREADSHEET_ID', '1pwVlYSGVjyTCLt4GT7xU2TCnxfdJuxAbp_jU6Snisls')
 SCOPES = [
     'https://www.googleapis.com/auth/gmail.readonly',
     'https://www.googleapis.com/auth/gmail.modify',
@@ -19,7 +20,7 @@ def list_dr_messages(gmail):
     messages = []
     request = gmail.users().messages().list(
         userId="me",
-        labelIds=[os.getenv('PUMA_RFPO_LABEL_ID', 'Label_1550910640571640980')],
+        labelIds=[test_safe_env('PUMA_RFPO_LABEL_ID', 'Label_1550910640571640980')],
         q="is:unread",            # keep it unread
         maxResults=50
     )
@@ -113,7 +114,7 @@ def list_rfpo_messages(gmail):
     msgs = []
     req = gmail.users().messages().list(
         userId="me",
-        labelIds=[os.getenv('PUMA_RFPO_LABEL_ID', 'Label_1550910640571640980')],
+        labelIds=[test_safe_env('PUMA_RFPO_LABEL_ID', 'Label_1550910640571640980')],
         q="is:unread has:attachment",
         maxResults=100
     )
