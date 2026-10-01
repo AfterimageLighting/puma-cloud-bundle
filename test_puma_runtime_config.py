@@ -26,7 +26,7 @@ class PumaRuntimeConfigTests(unittest.TestCase):
         with mock.patch.object(cfg, "TEST_MODE", True):
             with mock.patch.dict(
                 os.environ,
-                {"PUMA_SPREADSHEET_ID": "TEST_SPREADSHEET"},
+                {"PUMA_SPREADSHEET_ID": cfg.VERIFIED_TEST_TARGETS["PUMA_SPREADSHEET_ID"]},
                 clear=True,
             ):
                 self.assertEqual(
@@ -34,7 +34,7 @@ class PumaRuntimeConfigTests(unittest.TestCase):
                         "PUMA_SPREADSHEET_ID",
                         cfg.LIVE_PUMA_SPREADSHEET_ID,
                     ),
-                    "TEST_SPREADSHEET",
+                    cfg.VERIFIED_TEST_TARGETS["PUMA_SPREADSHEET_ID"],
                 )
 
     def test_test_mode_rejects_unverified_target(self):
