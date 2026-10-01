@@ -512,45 +512,51 @@ if __name__ == '__main__':
         import openpyxl  # noqa
 
     gmail_service, sheets_service = setup_services()
-    if gmail_service and sheets_service:
-        messages = get_emails(gmail_service)
-        if messages:
-            for m in messages:
-                try:
-                    project_guess, rows = get_and_process_emails_single(gmail_service, m)
-                    if project_guess is None:
-                        continue
+    if not gmail_service or not sheets_service:
+        raise SystemExit(1)
 
-                    resolution = resolve_okd_project(
-                        sheets_service,
-                        SPREADSHEET_ID,
-                        project_guess,
-                    )
+    error_count = 0
+    messages = get_emails(gmail_service)
+    if messages:
+    for m in messages:
+            try:
+                project_guess, rows = get_and_process_emails_single(gmail_service, m)
+                if project_guess is None:
+                    continue
 
-                    if not resolution.confirmed:
-                        if DEBUG:
-                            print(
-                                f"[OKD] PROJECT {resolution.status}: {project_guess} "
-                                f"method={resolution.method} suggestions={resolution.suggestions}"
-                            )
-                        # Do not create tabs and leave unread for review.
-                        continue
+                resolution = resolve_okd_project(
+                    sheets_service,
+                    SPREADSHEET_ID,
+                    project_guess,
+                )
 
-                    project_name = resolution.canonical_project
+                if not resolution.confirmed:
+                    if DEBUG:
+                        print(
+                            f"[OKD] PROJECT {resolution.status}: {project_guess} "
+                            f"method={resolution.method} suggestions={resolution.suggestions}"
+                        )
+                    # Do not create tabs and leave unread for review.
+                    continue
 
-                    # Ensure every imported row uses the confirmed canonical name.
-                    for row in rows:
-                        row["Project"] = project_name
+                project_name = resolution.canonical_project
 
-                    update_google_sheet(sheets_service, project_name, rows)
+                # Ensure every imported row uses the confirmed canonical name.
+                for row in rows:
+                    row["Project"] = project_name
 
-                    # Only mark the email read after the confirmed project has been
-                    # successfully created/updated.
-                    gmail_service.users().messages().modify(
-                        userId="me",
-                        id=m["id"],
-                        body={"removeLabelIds": ["UNREAD"]}
-                    ).execute()
-                except Exception as e:
-                    print(f"Error processing a message; continuing. Details: {e}")
-    print("PUMA automation script finished.")
+                update_google_sheet(sheets_service, project_name, rows)
+
+                # Only mark the email read after the confirmed project has been
+                # successfully created/updated.
+                gmail_service.users().messages().modify(
+                    userId="me",
+                    id=m["id"],
+                    body={"removeLabelIds": ["UNREAD"]}
+                ).execute()
+            except Exception as e:
+                error_count += 1
+                print(f"Error processing a message; continuing. Details: {e}")
+    print(f"PUMA automation script finished. errors={error_count}")
+    if error_count:
+        raise SystemExit(1)
