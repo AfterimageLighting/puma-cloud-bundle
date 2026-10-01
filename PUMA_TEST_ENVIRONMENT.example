@@ -31,3 +31,6 @@ PUMA_DISABLED_STEPS=
 
 # Keep existing Google/Gmail OAuth credentials in Secret Manager / Cloud Run
 # configuration. Do not commit those secrets to GitHub.
+
+# Run master without debug prompts/noise in Cloud Run
+PUMA_ARGS=--nodebug
