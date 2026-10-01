@@ -442,18 +442,20 @@ def run(args) -> int:
     threads = res.get("threads", []) or []
     print(f"[PO] Found {len(threads)} thread(s).")
 
+    error_count = 0
     for th in threads:
         try:
             process_thread(gmail, drive, sheets, th, PROJECTS_FOLDER_ID, MAKE_LINK_PUBLIC,
                            mark_read=args.mark_read, audit_nonpdf=args.audit_nonpdf)
         except Exception as e:
+            error_count += 1
             import traceback
             print("[PO] ERROR processing thread id:", th.get("id"), "|", repr(e))
             traceback.print_exc()
             continue
 
-    print("[PO] Completed OK")
-    return 0
+    print(f"[PO] Completed with errors={error_count}")
+    return 1 if error_count else 0
 
 
 def main(argv=None):
