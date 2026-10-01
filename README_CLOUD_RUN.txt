@@ -17,6 +17,7 @@ Required Google services:
 - cloudbuild.googleapis.com
 - artifactregistry.googleapis.com
 - logging.googleapis.com
+- firestore.googleapis.com
 
 TEST runtime environment:
 PUMA_TEST_MODE=1
@@ -35,6 +36,8 @@ PUMA_DR_BASE_FOLDER_ID=12hNy09LDDFAjyDl4q97GTTsCysyvSgJf
 PUMA_ALLOWED_STEPS=OKD,RFA,RFPO,PO,RR,RFPS,DR
 PUMA_DISABLED_STEPS=
 PUMA_ARGS=--nodebug
+PUMA_EXPECTED_GMAIL_ACCOUNT=adrian@afterimagelighting.com
+PUMA_LEASE_SECS=900
 
 Verified Gmail account:
 adrian@afterimagelighting.com
@@ -68,21 +71,30 @@ Expected secret-backed environment inputs used by cloud_entrypoint.py:
 BUILD/DEPLOY TEMPLATE
 Replace PROJECT_ID, PROJECT_NUMBER and SERVICE_ACCOUNT_EMAIL with the existing Google Cloud values.
 
+0. Preflight:
+   - Enable every Required Google service above, including firestore.googleapis.com.
+   - Confirm the Artifact Registry Docker repository named "puma" exists in us-central1.
+   - Confirm a Firestore database is initialized for PROJECT_ID. TEST mode fails closed if Firestore leasing is unavailable.
+   - Use a dedicated Cloud Run service account for the TEST service.
+   - The TEST service account needs, at minimum:
+     * roles/datastore.user (Firestore lease)
+     * roles/secretmanager.secretAccessor (OAuth secret bindings)
+   - Do not grant the TEST service account production-specific resources that are not required.
+
 1. Build:
    gcloud builds submit --tag us-central1-docker.pkg.dev/PROJECT_ID/puma/puma-orchestrator-test:latest
 
 2. Prepare the TEST env file:
    cp PUMA_TEST_ENVIRONMENT.example puma-test.env
-   Add this line to puma-test.env:
-   PUMA_ARGS=--nodebug
 
-   Review puma-test.env before deploying. It must contain only the verified PUMA TEST workbook, labels and Drive destinations above.
+   Review puma-test.env before deploying. It must contain only the verified PUMA TEST workbook, labels and Drive destinations above. Do not add production IDs.
 
 3. Deploy isolated TEST service:
    gcloud run deploy puma-orchestrator-test \
      --image us-central1-docker.pkg.dev/PROJECT_ID/puma/puma-orchestrator-test:latest \
      --region us-central1 \
      --platform managed \
+     --service-account SERVICE_ACCOUNT_EMAIL \
      --no-allow-unauthenticated \
      --env-vars-file=puma-test.env \
      --set-secrets "OAUTH_CLIENT_JSON=projects/PROJECT_NUMBER/secrets/OAUTH_CLIENT_JSON:latest,OAUTH_TOKEN_JSON=projects/PROJECT_NUMBER/secrets/OAUTH_TOKEN_JSON:latest"
@@ -92,14 +104,16 @@ Replace PROJECT_ID, PROJECT_NUMBER and SERVICE_ACCOUNT_EMAIL with the existing G
 
 5. Validate /healthz first.
 
-6. Invoke /run manually only after TEST-labeled fixture messages are prepared.
+6. Before invoking /run, verify the TEST service account can access Firestore and the configured OAuth secrets. A lease error in TEST is a hard failure by design.
 
-7. Inspect logs and verify all reads/writes reference only:
+7. Invoke /run manually only after TEST-labeled fixture messages are prepared.
+
+8. Inspect logs and verify all reads/writes reference only:
    - TEST workbook ID
    - PUMA TEST/* Gmail labels
    - TEST Drive destination IDs
 
-8. Do not create or enable a production scheduler from this branch.
+9. Do not create or enable a production scheduler until the manual TEST replay is clean.
 
 PRODUCTION RELEASE GATE
 Production deployment is allowed only after:
