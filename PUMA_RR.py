@@ -379,6 +379,7 @@ if __name__ == "__main__":
     if not gmail or not sheets or not drive: raise SystemExit(1)
 
     msgs = list_rr_messages(gmail)
+    error_count = 0
     for m in msgs:
         try:
             subject, atts, email_dt = get_subject_attachments_timestamp(gmail, m["id"])
@@ -443,7 +444,10 @@ if __name__ == "__main__":
             apply_rr_to_tracker(sheets, tab_title, subject, email_dt, file_link, items, values, idx, canon_to_rows)
             mark_read(gmail, m["id"])
         except Exception as e:
+            error_count += 1
             print(f"[RR] Error processing message {m.get('id')}: {e}")
 
-    print("PUMA6_RR complete.")
+    print(f"PUMA6_RR complete. errors={error_count}")
+    if error_count:
+        raise SystemExit(1)
 
