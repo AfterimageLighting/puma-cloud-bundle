@@ -37,9 +37,6 @@ ALLOCATE_BY_QTY = True   # True = allocate qty across duplicate parts; False = a
 import pdfplumber
 
 # ============================ Google auth/services ============================
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
