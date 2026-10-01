@@ -37,11 +37,7 @@ if "--nodebug" in sys.argv:
     DEBUG = False
 
 # ---- deps ----
-try:
-    import pdfplumber
-except Exception:
-    os.system(f"{sys.executable} -m pip install pdfplumber >/dev/null 2>&1")
-    import pdfplumber
+import pdfplumber
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
