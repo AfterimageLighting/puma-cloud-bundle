@@ -21,9 +21,6 @@ import pandas as pd  # needs openpyxl
 
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
-from google.auth.transport.requests import Request
 from puma_project_resolver import resolve_subject_to_existing_tracker
 from puma_runtime_config import required_env, test_safe_env, LIVE_PUMA_SPREADSHEET_ID
 from puma_status import can_auto_omit
