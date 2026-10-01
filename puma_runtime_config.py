@@ -26,6 +26,7 @@ VERIFIED_TEST_TARGETS = {
     "PUMA_DISABLED_STEPS": "",
     "PUMA_ARGS": "--nodebug",
     "PUMA_EXPECTED_GMAIL_ACCOUNT": "adrian@afterimagelighting.com",
+    "PUMA_LEASE_SECS": "900",
 }
 
 
