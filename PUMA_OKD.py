@@ -504,13 +504,6 @@ def update_google_sheet(sheets_service, project_name, data_rows):
 
 # ============================ Main =============================
 if __name__ == '__main__':
-    try:
-        import openpyxl  # noqa
-    except ImportError:
-        print("openpyxl not found. Installing...")
-        os.system("pip install openpyxl")
-        import openpyxl  # noqa
-
     gmail_service, sheets_service = setup_services()
     if not gmail_service or not sheets_service:
         raise SystemExit(1)
