@@ -33,7 +33,8 @@ STEPS = [
     ("RFA",   "PUMA_RFA.py",  []),
     ("RFPO",  "PUMA_RFPO.py", []),
     ("PO",    "PUMA_PO.py",   [
-        "--label", "PUMA/PUMA - PO",
+        # Label comes from PUMA_PO_LABEL_NAME so TEST mode cannot be
+        # overridden by a production label hard-coded in the orchestrator.
         "--only-unread",
         "--require-subject-po",
         "--exclude-rfpo",
