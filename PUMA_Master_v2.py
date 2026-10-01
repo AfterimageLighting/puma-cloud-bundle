@@ -24,6 +24,7 @@ import shlex
 import subprocess
 import datetime
 from typing import List, Dict
+from puma_runtime_config import TEST_MODE, validate_test_environment
 
 # ----------------------------
 # Pipeline definition
@@ -111,6 +112,45 @@ def bootstrap_auth() -> None:
     with open(token_path, "w", encoding="utf-8") as f:
         f.write(creds.to_json())
     print("[AUTH] token.json created with ALL required scopes. ✓")
+
+def validate_test_gmail_identity() -> None:
+    """In TEST mode, refuse to run under any Gmail account except the verified Afterimage account."""
+    if not TEST_MODE:
+        return
+
+    expected = os.getenv("PUMA_EXPECTED_GMAIL_ACCOUNT", "").strip().lower()
+    if not expected:
+        raise RuntimeError("PUMA_EXPECTED_GMAIL_ACCOUNT is required in PUMA_TEST_MODE")
+
+    from google.oauth2.credentials import Credentials
+    from googleapiclient.discovery import build
+
+    cid = os.getenv("GMAIL_CLIENT_ID")
+    csec = os.getenv("GMAIL_CLIENT_SECRET")
+    rtok = os.getenv("GMAIL_REFRESH_TOKEN")
+    if cid and csec and rtok:
+        creds = Credentials(
+            None,
+            refresh_token=rtok,
+            client_id=cid,
+            client_secret=csec,
+            token_uri="https://oauth2.googleapis.com/token",
+            scopes=UNION_SCOPES,
+        )
+    else:
+        creds = Credentials.from_authorized_user_file("token.json", UNION_SCOPES)
+
+    actual = (
+        build("gmail", "v1", credentials=creds, cache_discovery=False)
+        .users().getProfile(userId="me").execute().get("emailAddress", "")
+        .strip().lower()
+    )
+    if actual != expected:
+        raise RuntimeError(
+            f"PUMA TEST Gmail identity mismatch: expected {expected}, got {actual or '(blank)'}"
+        )
+    print(f"[AUTH] Verified TEST Gmail account: {actual}")
+
 
 # ----------------------------
 # Logging and helpers
@@ -294,9 +334,11 @@ def main():
     try:
         acquire_lock(lock_path)
         logger.write(f"[MASTER] Run ID: {run_id}\n")
+        validate_test_environment()
         logger.write(f"[MASTER] Log file: {log_path}\n")
 
         bootstrap_auth()
+        validate_test_gmail_identity()
 
         steps_to_run = []
         for label, script, extra in STEPS:
