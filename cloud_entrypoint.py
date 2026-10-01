@@ -65,7 +65,9 @@ def ensure_secrets() -> bool:
 # ----------------- orchestration -----------------
 def run_master() -> int:
     """Run the master orchestrator once; stream output; return exit code."""
-    master = "PUMA_Master_v2.py" if (APP_DIR / "PUMA_Master_v2.py").exists() else "PUMA_Master.py"
+    master = "PUMA_Master_v2.py"
+    if not (APP_DIR / master).exists():
+        raise RuntimeError("Hardened PUMA_Master_v2.py is missing from the runtime image")
     args = os.getenv("PUMA_ARGS", "").strip()
     cmd = [sys.executable, str(APP_DIR / master)]
     if args:
