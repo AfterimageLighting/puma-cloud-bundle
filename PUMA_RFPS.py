@@ -9,6 +9,7 @@ import os, re, io, sys, base64, datetime
 from typing import List, Tuple, Dict
 from puma_project_resolver import resolve_subject_to_existing_tracker
 from puma_runtime_config import test_safe_env
+from puma_status import can_advance_status, normalize_status
 
 SPREADSHEET_ID = test_safe_env('PUMA_SPREADSHEET_ID', '1pwVlYSGVjyTCLt4GT7xU2TCnxfdJuxAbp_jU6Snisls')
 
@@ -245,83 +246,100 @@ def apply_to_tracker(sheets, project_tab, subject, items, values, idx, canon_to_
     tab = project_tab
     ensure_unmatched_tab(sheets)
 
-    pn_col = idx.get("Part Number")
     qty_col = idx.get("Quantity")
     status_col = idx.get("Status")
     date_scheduled_col = idx.get("Date Scheduled")
 
-    def set_cell(row, cidx, val):
-        if cidx is None: return row
-        while len(row) <= cidx: row.append("")
-        row[cidx] = val; return row
+    status_updates: List[Tuple[int, str]] = []
+    scheduled_updates: List[Tuple[int, str]] = []
+    unmatched_rows = []
 
-    to_update, unmatched_rows = {}, []
-    def status_of(r): 
+    def status_of(r):
         return _lnorm(values[r][status_col]) if (status_col is not None and status_col < len(values[r])) else ""
+
     def row_qty_of(r):
         if qty_col is not None and qty_col < len(values[r]):
-            try: return int(float(values[r][qty_col]))
-            except: return 1
+            try:
+                return int(float(values[r][qty_col]))
+            except Exception:
+                return 1
         return 1
 
     for req_qty, pn in items:
         cpn = canon(pn)
         match_rows = canon_to_rows.get(cpn, []) or canon_to_rows.get(pn, [])
         if not match_rows:
-            unmatched_rows.append([datetime.datetime.now().isoformat(timespec="seconds"), tab, subject, str(req_qty), pn, "Part not on tracker"])
-            if DEBUG: print(f"[RFPS] UNMATCHED: {pn} (qty {req_qty})")
+            unmatched_rows.append([
+                datetime.datetime.now().isoformat(timespec="seconds"),
+                tab,
+                subject,
+                str(req_qty),
+                pn,
+                "Part not on tracker",
+            ])
+            if DEBUG:
+                print(f"[RFPS] UNMATCHED: {pn} (qty {req_qty})")
             continue
 
-        # Allocate across any row except Delivered
-        eligible = [r for r in match_rows if status_of(r) != "delivered"]
+        eligible = [r for r in match_rows if can_advance_status(status_of(r), "Scheduled")]
         remaining = req_qty
         rows_to_touch = []
         for r in eligible:
-            if remaining <= 0: break
+            if remaining <= 0:
+                break
             remaining -= row_qty_of(r)
             rows_to_touch.append(r)
 
         used = req_qty - max(remaining, 0)
-        if DEBUG: print(f"[RFPS] Allocated {used}/{req_qty} for {pn} across {len(rows_to_touch)} row(s).")
+        if DEBUG:
+            print(f"[RFPS] Allocated {used}/{req_qty} for {pn} across {len(rows_to_touch)} row(s).")
 
         for r in rows_to_touch:
-            row = list(values[r]) if r < len(values) else []
             cur = status_of(r)
-            if cur == "delivered": 
-                continue
-            set_cell(row, status_col, "Scheduled")
-            # Insert hyperlink timestamp into Date Scheduled
+            if status_col is not None and normalize_status(cur) != "scheduled":
+                status_updates.append((r, "Scheduled"))
+                while len(values[r]) <= status_col:
+                    values[r].append("")
+                values[r][status_col] = "Scheduled"
+
             if date_scheduled_col is not None:
                 link_formula = f'=HYPERLINK("{email_link}", "{ts.strftime("%Y-%m-%d %H:%M")}")'
-                set_cell(row, date_scheduled_col, link_formula)
-            to_update[r] = row
+                scheduled_updates.append((r, link_formula))
 
-    if to_update:
-        # Determine how far we need to write (at least through I, maybe farther if Date Scheduled exists)
-        max_col = 8  # I is 0-based 8
-        if date_scheduled_col is not None:
-            max_col = max(max_col, date_scheduled_col)
-        end_col_letter = _col_letter(max_col)
-        data = []
-        for r, row in sorted(to_update.items()):
-            # pad to end col
-            need_len = max(len(row), max_col+1)
-            if len(row) < need_len:
-                row = row + ([''] * (need_len - len(row)))
-            rng = f"{tab}!A{2+r}:{end_col_letter}{2+r}"
-            data.append({"range": rng, "values": [row[:need_len]]})
+    # Write ONLY the two fields this workflow owns. Never rewrite the entire
+    # tracker row, which could flatten PO links/formulas or overwrite other
+    # operational fields.
+    data = []
+    if status_col is not None:
+        col = _col_letter(status_col)
+        for r, val in status_updates:
+            data.append({"range": f"{tab}!{col}{2+r}", "values": [[val]]})
+    if date_scheduled_col is not None:
+        col = _col_letter(date_scheduled_col)
+        for r, val in scheduled_updates:
+            data.append({"range": f"{tab}!{col}{2+r}", "values": [[val]]})
 
-        sheets.spreadsheets().values().batchUpdate(spreadsheetId=SPREADSHEET_ID,
-            body={"valueInputOption":"USER_ENTERED","data":data}).execute()
-        if DEBUG: print(f"[RFPS] Updated {len(to_update)} row(s).")
+    if data:
+        sheets.spreadsheets().values().batchUpdate(
+            spreadsheetId=SPREADSHEET_ID,
+            body={"valueInputOption": "USER_ENTERED", "data": data},
+        ).execute()
+        if DEBUG:
+            print(f"[RFPS] Updated {len(set(r for r, _ in status_updates + scheduled_updates))} row(s).")
     else:
-        if DEBUG: print("[RFPS] No status changes were needed.")
+        if DEBUG:
+            print("[RFPS] No status changes were needed.")
 
     if unmatched_rows:
         sheets.spreadsheets().values().append(
-            spreadsheetId=SPREADSHEET_ID, range="RFPS Unmatched!A2:F",
-            valueInputOption="USER_ENTERED", body={"values": unmatched_rows}).execute()
-        if DEBUG: print(f"[RFPS] Logged {len(unmatched_rows)} unmatched item(s).")
+            spreadsheetId=SPREADSHEET_ID,
+            range="RFPS Unmatched!A2:F",
+            valueInputOption="USER_ENTERED",
+            body={"values": unmatched_rows},
+        ).execute()
+        if DEBUG:
+            print(f"[RFPS] Logged {len(unmatched_rows)} unmatched item(s).")
+
 
 # ---------- Main ----------
 if __name__ == "__main__":
