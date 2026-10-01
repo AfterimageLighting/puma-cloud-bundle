@@ -25,11 +25,7 @@ def resolve_label_id(gmail, label_name: str) -> str:
     raise ValueError(f"Label '{label_name}' not found.")
 
 # ---- deps ----
-try:
-    import pdfplumber
-except Exception:
-    os.system(f"{sys.executable} -m pip install pdfplumber >/dev/null 2>&1")
-    import pdfplumber
+import pdfplumber
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
