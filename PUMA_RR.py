@@ -7,9 +7,10 @@
 import os, re, io, sys, base64, datetime
 from typing import List, Tuple, Dict
 from puma_project_resolver import resolve_subject_to_existing_tracker
+from puma_runtime_config import test_safe_env
 
-SPREADSHEET_ID = os.getenv('PUMA_SPREADSHEET_ID', '1pwVlYSGVjyTCLt4GT7xU2TCnxfdJuxAbp_jU6Snisls').strip()
-RR_BASE_FOLDER_ID = os.getenv('PUMA_RR_BASE_FOLDER_ID', '1ZpATQXv7owmljEpLYrTvpuHgNU8nSPxC').strip()
+SPREADSHEET_ID = test_safe_env('PUMA_SPREADSHEET_ID', '1pwVlYSGVjyTCLt4GT7xU2TCnxfdJuxAbp_jU6Snisls')
+RR_BASE_FOLDER_ID = test_safe_env('PUMA_RR_BASE_FOLDER_ID', '1ZpATQXv7owmljEpLYrTvpuHgNU8nSPxC')
 MAKE_LINK_PUBLIC = False
 DEBUG = True
 if "--nodebug" in sys.argv:
@@ -73,7 +74,7 @@ def list_rr_messages(gmail):
     msgs = []
     req = gmail.users().messages().list(
         userId="me",
-        labelIds=[resolve_label_id(gmail, os.getenv('PUMA_RR_LABEL_NAME', 'PUMA - RR'))],
+        labelIds=[resolve_label_id(gmail, test_safe_env('PUMA_RR_LABEL_NAME', 'PUMA - RR'))],
         q="is:unread has:attachment",
         maxResults=50
     )
