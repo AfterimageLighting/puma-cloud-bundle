@@ -71,28 +71,35 @@ Replace PROJECT_ID, PROJECT_NUMBER and SERVICE_ACCOUNT_EMAIL with the existing G
 1. Build:
    gcloud builds submit --tag us-central1-docker.pkg.dev/PROJECT_ID/puma/puma-orchestrator-test:latest
 
-2. Deploy isolated TEST service:
+2. Prepare the TEST env file:
+   copy PUMA_TEST_ENVIRONMENT.example puma-test.env
+   Add this line to puma-test.env:
+   PUMA_ARGS=--nodebug
+
+   Review puma-test.env before deploying. It must contain only the verified PUMA TEST workbook, labels and Drive destinations above.
+
+3. Deploy isolated TEST service:
    gcloud run deploy puma-orchestrator-test \
      --image us-central1-docker.pkg.dev/PROJECT_ID/puma/puma-orchestrator-test:latest \
      --region us-central1 \
      --platform managed \
      --no-allow-unauthenticated \
-     --set-env-vars "PUMA_TEST_MODE=1,PUMA_SPREADSHEET_ID=1wjGB4dUTbBUiWVC7Kh0huVw8wM_ppmjTgktLw6ElVf4,PUMA_OKD_LABEL_ID=Label_1,PUMA_RFA_LABEL_NAME=PUMA TEST/RFA,PUMA_RFA_PROCESSED_LABEL_NAME=PUMA TEST/RFA Processed,PUMA_RFPO_LABEL_ID=Label_3,PUMA_PO_LABEL_NAME=PUMA TEST/PO,PUMA_RR_LABEL_NAME=PUMA TEST/RR,PUMA_RFPS_LABEL_ID=Label_6,PUMA_DR_LABEL_NAME=PUMA TEST/DR,PUMA_PO_DRIVE_FOLDER_ID=1EeexxItqTX896tq64lf1-8lBz2bqCBmH,PUMA_RR_BASE_FOLDER_ID=1WMpQwDwGGVq8R1AYxvJPAP8gOrgmP9Bg,PUMA_DR_BASE_FOLDER_ID=12hNy09LDDFAjyDl4q97GTTsCysyvSgJf,PUMA_ALLOWED_STEPS=OKD\,RFA\,RFPO\,PO\,RR\,RFPS\,DR,PUMA_DISABLED_STEPS=,PUMA_ARGS=--nodebug" \
+     --env-vars-file=puma-test.env \
      --set-secrets "OAUTH_CLIENT_JSON=projects/PROJECT_NUMBER/secrets/OAUTH_CLIENT_JSON:latest,OAUTH_TOKEN_JSON=projects/PROJECT_NUMBER/secrets/OAUTH_TOKEN_JSON:latest"
 
-3. Confirm service URL:
+4. Confirm service URL:
    gcloud run services describe puma-orchestrator-test --region us-central1 --format="value(status.url)"
 
-4. Validate /healthz first.
+5. Validate /healthz first.
 
-5. Invoke /run manually only after TEST-labeled fixture messages are prepared.
+6. Invoke /run manually only after TEST-labeled fixture messages are prepared.
 
-6. Inspect logs and verify all reads/writes reference only:
+7. Inspect logs and verify all reads/writes reference only:
    - TEST workbook ID
    - PUMA TEST/* Gmail labels
    - TEST Drive destination IDs
 
-7. Do not create or enable a production scheduler from this branch.
+8. Do not create or enable a production scheduler from this branch.
 
 PRODUCTION RELEASE GATE
 Production deployment is allowed only after:
