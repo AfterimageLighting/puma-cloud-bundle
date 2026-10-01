@@ -26,6 +26,7 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 from puma_project_resolver import resolve_subject_to_existing_tracker
 from puma_runtime_config import required_env, test_safe_env, LIVE_PUMA_SPREADSHEET_ID
+from puma_status import can_auto_omit
 
 # ---------------------------------------------------------------------------
 # CONFIG / ENVs
@@ -271,15 +272,16 @@ def apply_omissions_and_append(svc, titles_map, tracker_tab, project_name, data_
 
     # Mark omissions by searching col D
     if omit_pns:
-        colD = _call_with_backoff(
+        rows_dg = _call_with_backoff(
             svc.spreadsheets().values().get(
-                spreadsheetId=SPREADSHEET_ID, range=f"{tab}!D2:D"
+                spreadsheetId=SPREADSHEET_ID, range=f"{tab}!D2:G"
             ).execute
         ).get("values", [])
         requests, value_updates = [], []
-        for idx, v in enumerate(colD, start=2):
+        for idx, v in enumerate(rows_dg, start=2):
             pn = (v[0] if v else "").strip()
-            if pn in omit_pns:
+            status = v[3] if len(v) > 3 else ""
+            if pn in omit_pns and can_auto_omit(status):
                 # Strike-through columns C–E
                 requests.append({
                     "repeatCell": {
@@ -295,6 +297,11 @@ def apply_omissions_and_append(svc, titles_map, tracker_tab, project_name, data_
                     }
                 })
                 value_updates.append({"range": f"{tab}!G{idx}", "values": [["Omitted"]]})
+            elif pn in omit_pns:
+                print(
+                    f"[RFA] REVIEW: not auto-omitting {pn} on row {idx}; "
+                    f"current status {status!r} is operational/special."
+                )
 
         if requests:
             _call_with_backoff(
