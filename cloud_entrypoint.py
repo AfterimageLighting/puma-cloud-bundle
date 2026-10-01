@@ -5,6 +5,7 @@ import subprocess
 import pathlib
 from flask import Flask, jsonify
 from lease import run_with_lease
+from puma_runtime_config import TEST_MODE
 
 APP_DIR = pathlib.Path(__file__).parent
 app = Flask(__name__)
@@ -29,21 +30,37 @@ def _write_if_env(env_key: str, out_path: pathlib.Path) -> bool:
 
 def ensure_secrets() -> bool:
     """
-    Best-effort: write client_secrets.json and token.json from env.
-    Non-fatal if token.json is missing; fatal only if client_secrets.json is missing.
+    Materialize OAuth files when provided. Cloud/Test runs must never fall into
+    interactive OAuth. Explicit GMAIL_* refresh-token credentials are also valid.
     """
-    wrote_client = _write_if_env("OAUTH_CLIENT_JSON", APP_DIR / "client_secrets.json")
-    wrote_token  = _write_if_env("OAUTH_TOKEN_JSON",  APP_DIR / "token.json")
+    if (
+        os.getenv("GMAIL_CLIENT_ID")
+        and os.getenv("GMAIL_CLIENT_SECRET")
+        and os.getenv("GMAIL_REFRESH_TOKEN")
+    ):
+        print("[ENTRYPOINT] using GMAIL_* refresh-token credentials", flush=True)
+        return True
 
-    ok = True
-    if not (APP_DIR / "client_secrets.json").exists():
+    _write_if_env("OAUTH_CLIENT_JSON", APP_DIR / "client_secrets.json")
+    _write_if_env("OAUTH_TOKEN_JSON",  APP_DIR / "token.json")
+
+    client_ok = (APP_DIR / "client_secrets.json").exists()
+    token_ok = (APP_DIR / "token.json").exists()
+
+    if not client_ok:
         print("ERROR: client_secrets.json not present and OAUTH_CLIENT_JSON not set.",
               file=sys.stderr, flush=True)
-        ok = False
-    if not (APP_DIR / "token.json").exists():
-        print("WARNING: token.json missing. Provide OAUTH_TOKEN_JSON to avoid re-auth.",
-              file=sys.stderr, flush=True)
-    return ok
+    if not token_ok:
+        level = "ERROR" if (TEST_MODE or os.getenv("K_SERVICE")) else "WARNING"
+        print(
+            f"{level}: token.json missing. Cloud/Test cannot use interactive OAuth.",
+            file=sys.stderr,
+            flush=True,
+        )
+
+    if TEST_MODE or os.getenv("K_SERVICE"):
+        return client_ok and token_ok
+    return client_ok
 
 # ----------------- orchestration -----------------
 def run_master() -> int:
