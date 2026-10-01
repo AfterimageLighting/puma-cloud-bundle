@@ -336,6 +336,7 @@ if __name__ == "__main__":
     if not gmail or not sheets: raise SystemExit(1)
 
     msgs = list_rfpo_messages(gmail)
+    error_count = 0
     for m in msgs:
         try:
             subject, bodies, atts = _get_subject_bodies_attachments(gmail, m["id"])
@@ -391,5 +392,8 @@ if __name__ == "__main__":
                 body={"removeLabelIds": ["UNREAD"]}
             ).execute()
         except Exception as e:
+            error_count += 1
             print(f"[RFPO] Error processing message {m.get('id')}: {e}")
-    print("PUMA4_RFPO complete.")
+    print(f"PUMA4_RFPO complete. errors={error_count}")
+    if error_count:
+        raise SystemExit(1)
