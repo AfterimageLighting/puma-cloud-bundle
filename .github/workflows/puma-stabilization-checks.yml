@@ -45,6 +45,7 @@ jobs:
               "PUMA_ALLOWED_STEPS": "OKD,RFA,RFPO,PO,RR,RFPS,DR",
               "PUMA_DISABLED_STEPS": "",
               "PUMA_ARGS": "--nodebug",
+              "PUMA_EXPECTED_GMAIL_ACCOUNT": "adrian@afterimagelighting.com",
           }
 
           vals = {}
