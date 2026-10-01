@@ -337,6 +337,7 @@ if __name__ == "__main__":
     if not gmail or not sheets: raise SystemExit(1)
 
     msgs = list_rfps_messages(gmail)
+    error_count = 0
     for m in msgs:
         try:
             subject, body, ts, email_link = get_subject_and_body(gmail, m["id"])
@@ -383,6 +384,9 @@ if __name__ == "__main__":
             apply_to_tracker(sheets, tab_title, subject, items, values, idx, canon_to_rows, ts, email_link)
             mark_read(gmail, m["id"])
         except Exception as e:
+            error_count += 1
             print(f"[RFPS] Error processing message {m.get('id')}: {e}")
 
-    print("PUMA5_RFPS complete.")
+    print(f"PUMA5_RFPS complete. errors={error_count}")
+    if error_count:
+        raise SystemExit(1)
