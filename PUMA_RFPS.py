@@ -8,15 +8,16 @@
 import os, re, io, sys, base64, datetime
 from typing import List, Tuple, Dict
 from puma_project_resolver import resolve_subject_to_existing_tracker
+from puma_runtime_config import test_safe_env
 
-SPREADSHEET_ID = os.getenv('PUMA_SPREADSHEET_ID', '1pwVlYSGVjyTCLt4GT7xU2TCnxfdJuxAbp_jU6Snisls').strip()
+SPREADSHEET_ID = test_safe_env('PUMA_SPREADSHEET_ID', '1pwVlYSGVjyTCLt4GT7xU2TCnxfdJuxAbp_jU6Snisls')
 
 def list_dr_messages(gmail):
     """Return a list of Gmail message IDs for unread Requests for Packing Slips under PUMA - DR."""
     messages = []
     request = gmail.users().messages().list(
         userId="me",
-        labelIds=[os.getenv('PUMA_RFPS_LABEL_ID', 'Label_5687824868171199039')],
+        labelIds=[test_safe_env('PUMA_RFPS_LABEL_ID', 'Label_5687824868171199039')],
         q="is:unread",            # keep it unread
         maxResults=50
     )
@@ -97,7 +98,7 @@ def list_rfps_messages(gmail):
     msgs = []
     req = gmail.users().messages().list(
         userId="me",
-        labelIds=[os.getenv('PUMA_RFPS_LABEL_ID', 'Label_5687824868171199039')],
+        labelIds=[test_safe_env('PUMA_RFPS_LABEL_ID', 'Label_5687824868171199039')],
         q="is:unread",                     # RFPS parses from body, so attachments aren't required
         maxResults=100
     )
