@@ -25,6 +25,7 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 from puma_project_resolver import resolve_subject_to_existing_tracker
+from puma_runtime_config import required_env, test_safe_env, LIVE_PUMA_SPREADSHEET_ID
 
 # ---------------------------------------------------------------------------
 # CONFIG / ENVs
@@ -35,13 +36,10 @@ SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
 ]
 
-SPREADSHEET_ID = os.getenv("PUMA_SPREADSHEET_ID", "").strip()
-if not SPREADSHEET_ID:
-    print("ERROR: PUMA_SPREADSHEET_ID is not set.")
-    sys.exit(1)
+SPREADSHEET_ID = required_env("PUMA_SPREADSHEET_ID", LIVE_PUMA_SPREADSHEET_ID)
 
-RFA_LABEL_NAME = os.getenv("PUMA_RFA_LABEL_NAME", "PUMA - RFA")
-PROCESSED_LABEL_NAME = os.getenv("PUMA_RFA_PROCESSED_LABEL_NAME", "PUMA - RFA - Processed")
+RFA_LABEL_NAME = test_safe_env("PUMA_RFA_LABEL_NAME", "PUMA - RFA")
+PROCESSED_LABEL_NAME = test_safe_env("PUMA_RFA_PROCESSED_LABEL_NAME", "PUMA - RFA - Processed")
 PUMA_TRACKER_TEMPLATE_TAB = os.getenv("PUMA_TRACKER_TEMPLATE_TAB", "Project Tracker Template")
 
 # Query defaults to unread; we’ll always exclude the processed label
