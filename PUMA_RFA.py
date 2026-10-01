@@ -484,6 +484,7 @@ def run():
 
     page_token = None
     total = 0
+    error_count = 0
 
     while True:
         list_args = {
@@ -511,8 +512,10 @@ def run():
             try:
                 process_message(gm, sh, m)
             except HttpError as e:
+                error_count += 1
                 print(f"[RFA][ERROR] Gmail/Sheets API: {e}")
             except Exception as e:
+                error_count += 1
                 print(f"[RFA][ERROR] Unexpected: {e}")
 
         page_token = resp.get("nextPageToken")
@@ -520,7 +523,9 @@ def run():
             break
 
     if DEBUG:
-        print("[RFA] Done scanning label.")
+        print(f"[RFA] Done scanning label. errors={error_count}")
+    if error_count:
+        raise RuntimeError(f"RFA completed with {error_count} processing error(s)")
 
 if __name__ == "__main__":
     run()
