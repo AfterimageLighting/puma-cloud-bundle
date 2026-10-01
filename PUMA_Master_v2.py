@@ -25,6 +25,7 @@ import subprocess
 import datetime
 from typing import List, Dict
 from puma_runtime_config import TEST_MODE, validate_test_environment
+from puma_google_auth import load_google_user_credentials
 
 # ----------------------------
 # Pipeline definition
@@ -60,65 +61,9 @@ def _now_ts() -> str:
     return datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
 def bootstrap_auth() -> None:
-    # Fast-path for service-style creds provided via env (used by your Cloud Run)
-    if (
-        os.getenv("GMAIL_CLIENT_ID")
-        and os.getenv("GMAIL_CLIENT_SECRET")
-        and os.getenv("GMAIL_REFRESH_TOKEN")
-    ):
-        print("[AUTH] ENV credentials detected; skipping token.json bootstrap.")
-        return
-
-    try:
-        from google.oauth2.credentials import Credentials
-        from google_auth_oauthlib.flow import InstalledAppFlow
-        from google.auth.transport.requests import Request
-    except Exception as e:
-        if TEST_MODE or os.getenv("K_SERVICE"):
-            raise RuntimeError("Google auth dependencies are missing in Cloud/Test runtime") from e
-        print("[AUTH] Installing Google auth dependencies...")
-        os.system(
-            f"{sys.executable} -m pip install --quiet "
-            "google-api-python-client google-auth-httplib2 google-auth-oauthlib"
-        )
-        from google.oauth2.credentials import Credentials
-        from google_auth_oauthlib.flow import InstalledAppFlow
-        from google.auth.transport.requests import Request
-
-    token_path = "token.json"
-    creds = None
-    if os.path.exists(token_path):
-        try:
-            creds = Credentials.from_authorized_user_file(token_path, UNION_SCOPES)
-            if creds and creds.valid:
-                print("[AUTH] Existing token.json already covers all required scopes. ✓")
-                return
-            if creds and creds.expired and creds.refresh_token:
-                print("[AUTH] Refreshing existing token...")
-                creds.refresh(Request())
-                with open(token_path, "w", encoding="utf-8") as f:
-                    f.write(creds.to_json())
-                print("[AUTH] Token refreshed. ✓")
-                return
-            else:
-                print("[AUTH] Existing token.json missing scopes or cannot refresh; re-authorizing...")
-        except Exception:
-            print("[AUTH] token.json present but not usable for the union scopes; re-authorizing...")
-
-    if TEST_MODE or os.getenv("K_SERVICE"):
-        raise RuntimeError(
-            "Cloud/Test OAuth credentials are unusable or not refreshable; interactive authorization is disabled."
-        )
-
-    if not os.path.exists("client_secrets.json"):
-        print("ERROR: client_secrets.json not found in the current folder.")
-        sys.exit(1)
-
-    flow = InstalledAppFlow.from_client_secrets_file("client_secrets.json", UNION_SCOPES)
-    creds = flow.run_local_server(port=0)
-    with open(token_path, "w", encoding="utf-8") as f:
-        f.write(creds.to_json())
-    print("[AUTH] token.json created with ALL required scopes. ✓")
+    creds = load_google_user_credentials(UNION_SCOPES)
+    print("[AUTH] Non-interactive credential source is ready." if (TEST_MODE or os.getenv("K_SERVICE")) else "[AUTH] Google credentials ready.")
+    return creds
 
 def validate_test_gmail_identity() -> None:
     """In TEST mode, refuse to run under any Gmail account except the verified Afterimage account."""
@@ -129,24 +74,9 @@ def validate_test_gmail_identity() -> None:
     if not expected:
         raise RuntimeError("PUMA_EXPECTED_GMAIL_ACCOUNT is required in PUMA_TEST_MODE")
 
-    from google.oauth2.credentials import Credentials
     from googleapiclient.discovery import build
 
-    cid = os.getenv("GMAIL_CLIENT_ID")
-    csec = os.getenv("GMAIL_CLIENT_SECRET")
-    rtok = os.getenv("GMAIL_REFRESH_TOKEN")
-    if cid and csec and rtok:
-        creds = Credentials(
-            None,
-            refresh_token=rtok,
-            client_id=cid,
-            client_secret=csec,
-            token_uri="https://oauth2.googleapis.com/token",
-            scopes=UNION_SCOPES,
-        )
-    else:
-        creds = Credentials.from_authorized_user_file("token.json", UNION_SCOPES)
-
+    creds = load_google_user_credentials(UNION_SCOPES)
     actual = (
         build("gmail", "v1", credentials=creds, cache_discovery=False)
         .users().getProfile(userId="me").execute().get("emailAddress", "")
