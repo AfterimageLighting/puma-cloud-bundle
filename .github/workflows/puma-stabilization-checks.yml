@@ -11,7 +11,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.12'
+      - name: Install runtime dependencies
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
       - name: Compile Python
         run: |
           python -m py_compile \
@@ -19,6 +21,39 @@ jobs:
             PUMA_PO.py PUMA_RFA.py PUMA_RFPO.py PUMA_RFPS.py PUMA_RR.py \
             cloud_entrypoint.py lease.py puma_project_resolver.py \
             puma_runtime_config.py test_puma_project_resolver.py test_puma_runtime_config.py test_lease.py
+      - name: Import processor modules under verified TEST env
+        shell: bash
+        run: |
+          python - <<'PY'
+          import importlib
+          import os
+          from pathlib import Path
+
+          for raw in Path("PUMA_TEST_ENVIRONMENT.example").read_text(encoding="utf-8").splitlines():
+              line = raw.strip()
+              if not line or line.startswith("#") or "=" not in line:
+                  continue
+              key, value = line.split("=", 1)
+              os.environ[key.strip()] = value.strip()
+
+          modules = [
+              "puma_runtime_config",
+              "puma_project_resolver",
+              "lease",
+              "PUMA_OKD",
+              "PUMA_RFA",
+              "PUMA_RFPO",
+              "PUMA_PO",
+              "PUMA_RR",
+              "PUMA_RFPS",
+              "PUMA_DR",
+              "PUMA_Master_v2",
+              "cloud_entrypoint",
+          ]
+          for name in modules:
+              importlib.import_module(name)
+              print("Imported", name)
+          PY
       - name: Resolver and runtime unit tests
         run: python -m unittest -v test_puma_project_resolver.py test_puma_runtime_config.py test_lease.py
 
