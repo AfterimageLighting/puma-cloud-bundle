@@ -4,8 +4,9 @@
 import os, re, io, sys, base64, datetime
 from typing import List, Tuple, Dict
 from puma_project_resolver import resolve_subject_to_existing_tracker
+from puma_runtime_config import test_safe_env
 
-SPREADSHEET_ID = os.getenv('PUMA_SPREADSHEET_ID', '1pwVlYSGVjyTCLt4GT7xU2TCnxfdJuxAbp_jU6Snisls').strip()
+SPREADSHEET_ID = test_safe_env('PUMA_SPREADSHEET_ID', '1pwVlYSGVjyTCLt4GT7xU2TCnxfdJuxAbp_jU6Snisls')
 
 def resolve_label_id(gmail, label_name: str) -> str:
     """Return Gmail labelId for a visible label name."""
@@ -20,7 +21,7 @@ def list_dr_messages(gmail):
     messages = []
     request = gmail.users().messages().list(
         userId="me",
-        labelIds=[resolve_label_id(gmail, os.getenv('PUMA_DR_LABEL_NAME', 'PUMA - DR'))],
+        labelIds=[resolve_label_id(gmail, test_safe_env('PUMA_DR_LABEL_NAME', 'PUMA - DR'))],
         q="is:unread has:attachment",            # keep it unread + attachment
         maxResults=50
     )
@@ -29,7 +30,7 @@ def list_dr_messages(gmail):
         messages.extend(response.get("messages", []))
         request = gmail.users().messages().list_next(previous_request=request, previous_response=response)
     return messages
-DR_BASE_FOLDER_ID = os.getenv('PUMA_DR_BASE_FOLDER_ID', '1b6W8VNs77TA-UC5j-8NryQxlAebXYSyI').strip()
+DR_BASE_FOLDER_ID = test_safe_env('PUMA_DR_BASE_FOLDER_ID', '1b6W8VNs77TA-UC5j-8NryQxlAebXYSyI')
 MAKE_LINK_PUBLIC = False
 DEBUG = True
 if "--nodebug" in sys.argv:
