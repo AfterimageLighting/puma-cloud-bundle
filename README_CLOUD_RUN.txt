@@ -72,7 +72,7 @@ Replace PROJECT_ID, PROJECT_NUMBER and SERVICE_ACCOUNT_EMAIL with the existing G
    gcloud builds submit --tag us-central1-docker.pkg.dev/PROJECT_ID/puma/puma-orchestrator-test:latest
 
 2. Prepare the TEST env file:
-   copy PUMA_TEST_ENVIRONMENT.example puma-test.env
+   cp PUMA_TEST_ENVIRONMENT.example puma-test.env
    Add this line to puma-test.env:
    PUMA_ARGS=--nodebug
 
