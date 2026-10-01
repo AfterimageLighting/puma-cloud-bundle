@@ -18,9 +18,9 @@ jobs:
             PUMA_DR.py PUMA_Master.py PUMA_Master_v2.py PUMA_OKD.py \
             PUMA_PO.py PUMA_RFA.py PUMA_RFPO.py PUMA_RFPS.py PUMA_RR.py \
             cloud_entrypoint.py lease.py puma_project_resolver.py \
-            puma_runtime_config.py test_puma_project_resolver.py test_puma_runtime_config.py
+            puma_runtime_config.py test_puma_project_resolver.py test_puma_runtime_config.py test_lease.py
       - name: Resolver and runtime unit tests
-        run: python -m unittest -v test_puma_project_resolver.py test_puma_runtime_config.py
+        run: python -m unittest -v test_puma_project_resolver.py test_puma_runtime_config.py test_lease.py
 
       - name: Validate verified TEST environment file
         shell: bash
