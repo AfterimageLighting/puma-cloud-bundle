@@ -4,8 +4,9 @@
 import os, re, io, sys, base64, datetime
 from typing import List, Tuple, Dict
 from puma_project_resolver import resolve_subject_to_existing_tracker
+from puma_runtime_config import test_safe_env
 
-SPREADSHEET_ID = '1pwVlYSGVjyTCLt4GT7xU2TCnxfdJuxAbp_jU6Snisls'
+SPREADSHEET_ID = test_safe_env('PUMA_SPREADSHEET_ID', '1pwVlYSGVjyTCLt4GT7xU2TCnxfdJuxAbp_jU6Snisls')
 
 def resolve_label_id(gmail, label_name: str) -> str:
     """Return Gmail labelId for a visible label name."""
@@ -20,7 +21,7 @@ def list_dr_messages(gmail):
     messages = []
     request = gmail.users().messages().list(
         userId="me",
-        labelIds=[resolve_label_id(gmail, "PUMA - DR")],
+        labelIds=[resolve_label_id(gmail, test_safe_env('PUMA_DR_LABEL_NAME', 'PUMA - DR'))],
         q="is:unread has:attachment",            # keep it unread + attachment
         maxResults=50
     )
@@ -29,18 +30,14 @@ def list_dr_messages(gmail):
         messages.extend(response.get("messages", []))
         request = gmail.users().messages().list_next(previous_request=request, previous_response=response)
     return messages
-DR_BASE_FOLDER_ID = "1b6W8VNs77TA-UC5j-8NryQxlAebXYSyI"
+DR_BASE_FOLDER_ID = test_safe_env('PUMA_DR_BASE_FOLDER_ID', '1b6W8VNs77TA-UC5j-8NryQxlAebXYSyI')
 MAKE_LINK_PUBLIC = False
 DEBUG = True
 if "--nodebug" in sys.argv:
     DEBUG = False
 
 # ---- deps ----
-try:
-    import pdfplumber
-except Exception:
-    os.system(f"{sys.executable} -m pip install pdfplumber >/dev/null 2>&1")
-    import pdfplumber
+import pdfplumber
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -364,6 +361,7 @@ if __name__ == "__main__":
     if not gmail or not sheets or not drive: raise SystemExit(1)
 
     msgs = list_dr_messages(gmail)
+    error_count = 0
     for m in msgs:
         try:
             subject, atts, email_dt = get_subject_attachments_timestamp(gmail, m["id"])
@@ -428,7 +426,10 @@ if __name__ == "__main__":
             apply_dr_to_tracker(sheets, tab_title, subject, email_dt, file_link, items, values, idx, canon_to_rows)
             mark_read(gmail, m["id"])
         except Exception as e:
+            error_count += 1
             print(f"[DR] Error processing message {m.get('id')}: {e}")
 
-    print("PUMA1_DR complete.")
+    print(f"PUMA1_DR complete. errors={error_count}")
+    if error_count:
+        raise SystemExit(1)
 

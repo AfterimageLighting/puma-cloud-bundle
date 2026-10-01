@@ -10,6 +10,7 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
 from google.auth.exceptions import RefreshError
 from puma_project_resolver import resolve_existing_tracker
+from puma_runtime_config import required_env, test_safe_env, LIVE_PUMA_SPREADSHEET_ID
 
 # (lightweight parsing helper – keep whatever you already use)
 try:
@@ -26,13 +27,13 @@ SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
 ]
 
-DEFAULT_LABEL_VISIBLE_NAME = "PUMA/PUMA - PO"
+DEFAULT_LABEL_VISIBLE_NAME = test_safe_env("PUMA_PO_LABEL_NAME", "PUMA/PUMA - PO")
 TAB_MATCHED   = "PO Matched"
 TAB_UNMATCHED = "PO Unmatched"
 
 # Drive folder + sheet id from env (with sanitizer)
-PROJECTS_FOLDER_ID = os.getenv("PUMA_PO_DRIVE_FOLDER_ID", "")
-RAW_SPREADSHEET_ID = os.getenv("PUMA_SPREADSHEET_ID", "")
+PROJECTS_FOLDER_ID = required_env("PUMA_PO_DRIVE_FOLDER_ID")
+RAW_SPREADSHEET_ID = required_env("PUMA_SPREADSHEET_ID", LIVE_PUMA_SPREADSHEET_ID)
 # Remove any stray angle brackets or whitespace that may have been pasted
 SPREADSHEET_ID     = re.sub(r"[<>\s]", "", RAW_SPREADSHEET_ID)
 MAKE_LINK_PUBLIC   = False
@@ -441,18 +442,20 @@ def run(args) -> int:
     threads = res.get("threads", []) or []
     print(f"[PO] Found {len(threads)} thread(s).")
 
+    error_count = 0
     for th in threads:
         try:
             process_thread(gmail, drive, sheets, th, PROJECTS_FOLDER_ID, MAKE_LINK_PUBLIC,
                            mark_read=args.mark_read, audit_nonpdf=args.audit_nonpdf)
         except Exception as e:
+            error_count += 1
             import traceback
             print("[PO] ERROR processing thread id:", th.get("id"), "|", repr(e))
             traceback.print_exc()
             continue
 
-    print("[PO] Completed OK")
-    return 0
+    print(f"[PO] Completed with errors={error_count}")
+    return 1 if error_count else 0
 
 
 def main(argv=None):

@@ -8,15 +8,16 @@
 import os, re, io, sys, base64, datetime
 from typing import List, Tuple, Dict
 from puma_project_resolver import resolve_subject_to_existing_tracker
+from puma_runtime_config import test_safe_env
 
-SPREADSHEET_ID = '1pwVlYSGVjyTCLt4GT7xU2TCnxfdJuxAbp_jU6Snisls'
+SPREADSHEET_ID = test_safe_env('PUMA_SPREADSHEET_ID', '1pwVlYSGVjyTCLt4GT7xU2TCnxfdJuxAbp_jU6Snisls')
 
 def list_dr_messages(gmail):
     """Return a list of Gmail message IDs for unread Requests for Packing Slips under PUMA - DR."""
     messages = []
     request = gmail.users().messages().list(
         userId="me",
-        labelIds=["Label_5687824868171199039"],           # <-- put the actual PUMA - DR label ID here
+        labelIds=[test_safe_env('PUMA_RFPS_LABEL_ID', 'Label_5687824868171199039')],
         q="is:unread",            # keep it unread
         maxResults=50
     )
@@ -29,19 +30,11 @@ def list_dr_messages(gmail):
 DEBUG = ("--debug" in sys.argv)
 
 # ---------- Google API deps ----------
-try:
-    from google.auth.transport.requests import Request
-    from google.oauth2.credentials import Credentials
-    from google_auth_oauthlib.flow import InstalledAppFlow
-    from googleapiclient.discovery import build
-    from googleapiclient.errors import HttpError
-except Exception:
-    os.system(f"{sys.executable} -m pip install --quiet google-api-python-client google-auth-httplib2 google-auth-oauthlib")
-    from google.auth.transport.requests import Request
-    from google.oauth2.credentials import Credentials
-    from google_auth_oauthlib.flow import InstalledAppFlow
-    from googleapiclient.discovery import build
-    from googleapiclient.errors import HttpError
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 
 SCOPES = [
     'https://www.googleapis.com/auth/gmail.readonly',
@@ -97,7 +90,7 @@ def list_rfps_messages(gmail):
     msgs = []
     req = gmail.users().messages().list(
         userId="me",
-        labelIds=["Label_5687824868171199039"],   # <-- replace with your actual RFPS label ID
+        labelIds=[test_safe_env('PUMA_RFPS_LABEL_ID', 'Label_5687824868171199039')],
         q="is:unread",                     # RFPS parses from body, so attachments aren't required
         maxResults=100
     )
@@ -336,6 +329,7 @@ if __name__ == "__main__":
     if not gmail or not sheets: raise SystemExit(1)
 
     msgs = list_rfps_messages(gmail)
+    error_count = 0
     for m in msgs:
         try:
             subject, body, ts, email_link = get_subject_and_body(gmail, m["id"])
@@ -382,6 +376,9 @@ if __name__ == "__main__":
             apply_to_tracker(sheets, tab_title, subject, items, values, idx, canon_to_rows, ts, email_link)
             mark_read(gmail, m["id"])
         except Exception as e:
+            error_count += 1
             print(f"[RFPS] Error processing message {m.get('id')}: {e}")
 
-    print("PUMA5_RFPS complete.")
+    print(f"PUMA5_RFPS complete. errors={error_count}")
+    if error_count:
+        raise SystemExit(1)

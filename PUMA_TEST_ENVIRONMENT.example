@@ -1,0 +1,39 @@
+# PUMA TEST environment (non-secret example)
+# Created 2026-09-30.
+#
+# This configuration points the Cloud processors at the isolated test workbook,
+# test Gmail labels, and test Drive folders. It contains NO passwords, OAuth
+# refresh tokens, client secrets, or API keys.
+
+# Fail closed: when enabled, production IDs/labels are rejected.
+PUMA_TEST_MODE=1
+
+PUMA_SPREADSHEET_ID=1wjGB4dUTbBUiWVC7Kh0huVw8wM_ppmjTgktLw6ElVf4
+
+# Verified Gmail identity
+PUMA_EXPECTED_GMAIL_ACCOUNT=adrian@afterimagelighting.com
+
+# Test Gmail routing
+PUMA_OKD_LABEL_ID=Label_1
+PUMA_RFA_LABEL_NAME=PUMA TEST/RFA
+PUMA_RFA_PROCESSED_LABEL_NAME=PUMA TEST/RFA Processed
+PUMA_RFPO_LABEL_ID=Label_3
+PUMA_PO_LABEL_NAME=PUMA TEST/PO
+PUMA_RR_LABEL_NAME=PUMA TEST/RR
+PUMA_RFPS_LABEL_ID=Label_6
+PUMA_DR_LABEL_NAME=PUMA TEST/DR
+
+# Test Drive destinations
+PUMA_PO_DRIVE_FOLDER_ID=1EeexxItqTX896tq64lf1-8lBz2bqCBmH
+PUMA_RR_BASE_FOLDER_ID=1WMpQwDwGGVq8R1AYxvJPAP8gOrgmP9Bg
+PUMA_DR_BASE_FOLDER_ID=12hNy09LDDFAjyDl4q97GTTsCysyvSgJf
+
+# For a full test pass. Production currently has a more restricted step set.
+PUMA_ALLOWED_STEPS=OKD,RFA,RFPO,PO,RR,RFPS,DR
+PUMA_DISABLED_STEPS=
+
+# Keep existing Google/Gmail OAuth credentials in Secret Manager / Cloud Run
+# configuration. Do not commit those secrets to GitHub.
+
+# Run master without debug prompts/noise in Cloud Run
+PUMA_ARGS=--nodebug

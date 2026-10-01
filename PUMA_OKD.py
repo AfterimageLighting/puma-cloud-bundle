@@ -10,9 +10,10 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from openpyxl import load_workbook
 from puma_project_resolver import resolve_okd_project, clean_subject_project
+from puma_runtime_config import test_safe_env
 
 # ============================ Config ============================
-SPREADSHEET_ID = '1pwVlYSGVjyTCLt4GT7xU2TCnxfdJuxAbp_jU6Snisls'
+SPREADSHEET_ID = test_safe_env('PUMA_SPREADSHEET_ID', '1pwVlYSGVjyTCLt4GT7xU2TCnxfdJuxAbp_jU6Snisls')
 SCOPES = [
     'https://www.googleapis.com/auth/gmail.readonly',
     'https://www.googleapis.com/auth/gmail.modify',
@@ -184,7 +185,7 @@ def get_emails(gmail_service):
     out = []
     req = gmail_service.users().messages().list(
         userId="me",
-        labelIds=["Label_1716122347040870890"],   # <-- your real PUMA - OKD label ID
+        labelIds=[test_safe_env('PUMA_OKD_LABEL_ID', 'Label_1716122347040870890')],
         q="is:unread has:attachment",
         maxResults=100
     )
@@ -503,53 +504,52 @@ def update_google_sheet(sheets_service, project_name, data_rows):
 
 # ============================ Main =============================
 if __name__ == '__main__':
-    try:
-        import openpyxl  # noqa
-    except ImportError:
-        print("openpyxl not found. Installing...")
-        os.system("pip install openpyxl")
-        import openpyxl  # noqa
-
     gmail_service, sheets_service = setup_services()
-    if gmail_service and sheets_service:
-        messages = get_emails(gmail_service)
-        if messages:
-            for m in messages:
-                try:
-                    project_guess, rows = get_and_process_emails_single(gmail_service, m)
-                    if project_guess is None:
-                        continue
+    if not gmail_service or not sheets_service:
+        raise SystemExit(1)
 
-                    resolution = resolve_okd_project(
-                        sheets_service,
-                        SPREADSHEET_ID,
-                        project_guess,
+    error_count = 0
+    messages = get_emails(gmail_service)
+    for m in messages:
+        try:
+            project_guess, rows = get_and_process_emails_single(gmail_service, m)
+            if project_guess is None:
+                continue
+
+            resolution = resolve_okd_project(
+                sheets_service,
+                SPREADSHEET_ID,
+                project_guess,
+            )
+
+            if not resolution.confirmed:
+                if DEBUG:
+                    print(
+                        f"[OKD] PROJECT {resolution.status}: {project_guess} "
+                        f"method={resolution.method} suggestions={resolution.suggestions}"
                     )
+                # Do not create tabs and leave unread for review.
+                continue
 
-                    if not resolution.confirmed:
-                        if DEBUG:
-                            print(
-                                f"[OKD] PROJECT {resolution.status}: {project_guess} "
-                                f"method={resolution.method} suggestions={resolution.suggestions}"
-                            )
-                        # Do not create tabs and leave unread for review.
-                        continue
+            project_name = resolution.canonical_project
 
-                    project_name = resolution.canonical_project
+            # Ensure every imported row uses the confirmed canonical name.
+            for row in rows:
+                row["Project"] = project_name
 
-                    # Ensure every imported row uses the confirmed canonical name.
-                    for row in rows:
-                        row["Project"] = project_name
+            update_google_sheet(sheets_service, project_name, rows)
 
-                    update_google_sheet(sheets_service, project_name, rows)
+            # Only mark the email read after the confirmed project has been
+            # successfully created/updated.
+            gmail_service.users().messages().modify(
+                userId="me",
+                id=m["id"],
+                body={"removeLabelIds": ["UNREAD"]}
+            ).execute()
+        except Exception as e:
+            error_count += 1
+            print(f"Error processing a message; continuing. Details: {e}")
 
-                    # Only mark the email read after the confirmed project has been
-                    # successfully created/updated.
-                    gmail_service.users().messages().modify(
-                        userId="me",
-                        id=m["id"],
-                        body={"removeLabelIds": ["UNREAD"]}
-                    ).execute()
-                except Exception as e:
-                    print(f"Error processing a message; continuing. Details: {e}")
-    print("PUMA automation script finished.")
+    print(f"PUMA automation script finished. errors={error_count}")
+    if error_count:
+        raise SystemExit(1)

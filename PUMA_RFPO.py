@@ -2,9 +2,10 @@
 import os, re, base64, datetime, html, io, sys
 from typing import List, Tuple, Dict, Optional
 from puma_project_resolver import resolve_subject_to_existing_tracker
+from puma_runtime_config import test_safe_env
 
 # ============================ Config ============================
-SPREADSHEET_ID = '1pwVlYSGVjyTCLt4GT7xU2TCnxfdJuxAbp_jU6Snisls'
+SPREADSHEET_ID = test_safe_env('PUMA_SPREADSHEET_ID', '1pwVlYSGVjyTCLt4GT7xU2TCnxfdJuxAbp_jU6Snisls')
 SCOPES = [
     'https://www.googleapis.com/auth/gmail.readonly',
     'https://www.googleapis.com/auth/gmail.modify',
@@ -19,7 +20,7 @@ def list_dr_messages(gmail):
     messages = []
     request = gmail.users().messages().list(
         userId="me",
-        labelIds=["Label_1550910640571640980"],           # <-- put the actual PUMA - RFPO label ID here
+        labelIds=[test_safe_env('PUMA_RFPO_LABEL_ID', 'Label_1550910640571640980')],
         q="is:unread",            # keep it unread
         maxResults=50
     )
@@ -32,12 +33,7 @@ def list_dr_messages(gmail):
 ALLOCATE_BY_QTY = True   # True = allocate qty across duplicate parts; False = approve all matches
 
 # ============================ Deps ============================
-try:
-    import pdfplumber  # type: ignore
-except ImportError:
-    print("Installing pdfplumber...")
-    os.system(f"{sys.executable} -m pip install pdfplumber")
-    import pdfplumber  # type: ignore
+import pdfplumber
 
 # ============================ Google auth/services ============================
 from google.auth.transport.requests import Request
@@ -113,7 +109,7 @@ def list_rfpo_messages(gmail):
     msgs = []
     req = gmail.users().messages().list(
         userId="me",
-        labelIds=["Label_1550910640571640980"],   # <-- replace with your actual RFPO label ID
+        labelIds=[test_safe_env('PUMA_RFPO_LABEL_ID', 'Label_1550910640571640980')],
         q="is:unread has:attachment",
         maxResults=100
     )
@@ -335,6 +331,7 @@ if __name__ == "__main__":
     if not gmail or not sheets: raise SystemExit(1)
 
     msgs = list_rfpo_messages(gmail)
+    error_count = 0
     for m in msgs:
         try:
             subject, bodies, atts = _get_subject_bodies_attachments(gmail, m["id"])
@@ -390,5 +387,8 @@ if __name__ == "__main__":
                 body={"removeLabelIds": ["UNREAD"]}
             ).execute()
         except Exception as e:
+            error_count += 1
             print(f"[RFPO] Error processing message {m.get('id')}: {e}")
-    print("PUMA4_RFPO complete.")
+    print(f"PUMA4_RFPO complete. errors={error_count}")
+    if error_count:
+        raise SystemExit(1)

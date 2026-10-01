@@ -3,6 +3,7 @@ import uuid
 import threading
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Optional, Dict, Any
+from puma_runtime_config import TEST_MODE
 
 # If set to "1", Firestore is completely bypassed (useful for local runs).
 PUMA_DISABLE_LEASE = os.getenv("PUMA_DISABLE_LEASE") == "1"
@@ -91,11 +92,15 @@ def _make_lease() -> object:
       3) No-op fallback
     """
     if PUMA_DISABLE_LEASE:
+        if TEST_MODE:
+            raise RuntimeError("PUMA_DISABLE_LEASE is not allowed in PUMA_TEST_MODE")
         return NoopLease()
     try:
         # Try to create a Firestore client; if it fails, fall back
         return FsLease()
     except Exception as e:
+        if TEST_MODE:
+            raise RuntimeError(f"Firestore lease unavailable in PUMA_TEST_MODE: {e}") from e
         print(f"[LEASE] Firestore unavailable, using no-op lease: {e}", flush=True)
         return NoopLease()
 
@@ -107,21 +112,29 @@ def run_with_lease(
     Acquire a lease, run do_work(run_id=..., holder=...), send heartbeats, and release.
     Returns a JSON-serializable dict explaining what happened.
     """
-    lease = _make_lease()
+    try:
+        lease = _make_lease()
+    except Exception as e:
+        return {"ok": False, "skipped": False, "error": str(e), "lease": "unavailable"}
 
-    # No-op lease: just run
+    # No-op lease: just run (production compatibility only).
     if isinstance(lease, NoopLease):
         result = do_work(run_id=lease.run_id, holder=lease.holder)
-        return {"ok": True, "skipped": False, "result": result, "lease": "noop"}
+        inner_ok = result.get("ok", True) if isinstance(result, dict) else True
+        return {"ok": bool(inner_ok), "skipped": False, "result": result, "lease": "noop"}
 
     # Firestore-backed
     try:
         acquired = lease.acquire(lease_secs=lease_secs)
     except Exception as e:
-        # If Firestore errors, do not block the run — behave like no-op to keep the pipeline alive
+        if TEST_MODE:
+            return {"ok": False, "skipped": False, "error": f"Lease acquire failed: {e}", "lease": "acquire-error"}
+        # Preserve production compatibility for now; production behavior should be
+        # intentionally changed only after isolated TEST validation.
         print(f"[LEASE] acquire error, falling back to run anyway: {e}", flush=True)
         result = do_work(run_id="fallback", holder="fallback")
-        return {"ok": True, "skipped": False, "result": result, "lease": "error-fallback"}
+        inner_ok = result.get("ok", True) if isinstance(result, dict) else True
+        return {"ok": bool(inner_ok), "skipped": False, "result": result, "lease": "error-fallback"}
 
     if not acquired:
         return {"ok": True, "skipped": True, "reason": "busy"}
@@ -140,7 +153,8 @@ def run_with_lease(
     t.start()
     try:
         result = do_work(run_id=lease.run_id, holder=lease.holder)
-        return {"ok": True, "skipped": False, "result": result}
+        inner_ok = result.get("ok", True) if isinstance(result, dict) else True
+        return {"ok": bool(inner_ok), "skipped": False, "result": result}
     finally:
         stop.set()
         t.join(timeout=2.0)

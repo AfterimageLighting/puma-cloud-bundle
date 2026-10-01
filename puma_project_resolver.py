@@ -153,7 +153,12 @@ def _tracker_part_evidence(
     tracker_titles: Sequence[str],
     parts: Sequence[str],
 ) -> Dict[str, int]:
-    """Count exact part-number hits per tracker. Read-only."""
+    """Count DISTINCT exact requested part hits per tracker. Read-only.
+
+    A single part hit is supporting evidence only because common parts can appear
+    across unrelated jobs. Two or more distinct requested parts on one tracker
+    can be strong corroboration when there is one unique winner.
+    """
     wanted = {_canon_part(p) for p in parts if _canon_part(p)}
     if not wanted:
         return {}
@@ -187,15 +192,17 @@ def _tracker_part_evidence(
         if part_col is None:
             continue
 
-        hits = 0
+        matched_parts = set()
         for row in rows[(header_row or 0) + 1:]:
-            if part_col < len(row) and _canon_part(row[part_col]) in wanted:
-                hits += 1
-        if hits:
-            scores[title] = hits
+            if part_col < len(row):
+                part = _canon_part(row[part_col])
+                if part in wanted:
+                    matched_parts.add(part)
+
+        if matched_parts:
+            scores[title] = len(matched_parts)
 
     return scores
-
 
 def resolve_existing_tracker(
     sheets_service,
@@ -233,28 +240,60 @@ def resolve_existing_tracker(
         result.suggestions = [(tracker_base(t), 1.0) for t in matches]
         return result
 
-    # Independent exact part-number evidence can confirm one tracker.
+    # If the name exactly belongs to Open Projects but no tracker exists, do
+    # not let generic part evidence reroute the event to another job.
+    open_matches = [
+        name for name in _open_project_names(sheets_service, spreadsheet_id)
+        if normalize_project_key(name) == key
+    ] if key else []
+
+    if len(open_matches) == 1:
+        result.status = "REVIEW"
+        result.method = "OPEN_PROJECT_TRACKER_MISSING"
+        result.canonical_project = open_matches[0]
+        result.reasons.append(
+            "Project exists in Open Projects but no existing tracker resolves it."
+        )
+        result.suggestions = [(open_matches[0], 1.0)]
+        return result
+
+    if len(open_matches) > 1:
+        result.status = "CONFLICT"
+        result.method = "OPEN_PROJECT_COLLISION"
+        result.conflicts.append(
+            "Multiple Open Projects rows normalize to the same project identity."
+        )
+        result.suggestions = [(name, 1.0) for name in open_matches]
+        return result
+
+    # Exact part-number evidence: one distinct part is suggestion-only.
+    # Two or more distinct requested parts on one unique tracker may confirm.
     if parts:
         part_hits = _tracker_part_evidence(sheets_service, spreadsheet_id, titles, parts)
         if part_hits:
             max_hits = max(part_hits.values())
             winners = [t for t, n in part_hits.items() if n == max_hits]
-            if len(winners) == 1 and max_hits >= 1:
+            if len(winners) == 1 and max_hits >= 2:
                 title = winners[0]
                 result.status = "CONFIRMED"
                 result.tracker_title = title
                 result.canonical_project = tracker_base(title)
-                result.method = "PART_CROSSCHECK"
+                result.method = "MULTI_PART_CROSSCHECK"
                 result.reasons.append(
-                    f"Exact part-number evidence uniquely points to this tracker ({max_hits} hit(s))."
+                    f"{max_hits} distinct exact requested parts uniquely point to this tracker."
                 )
                 return result
-            if len(winners) > 1:
-                result.status = "CONFLICT"
-                result.method = "PART_EVIDENCE_CONFLICT"
-                result.conflicts.append("Exact part-number evidence points to multiple trackers.")
-                result.suggestions = [(tracker_base(t), 1.0) for t in winners]
-                return result
+
+            result.status = "REVIEW"
+            result.method = "PART_SUGGESTION_ONLY"
+            result.reasons.append(
+                "Part evidence is not strong enough by itself to authorize a write."
+            )
+            result.suggestions = [
+                (tracker_base(t), float(part_hits[t]))
+                for t in sorted(part_hits, key=lambda x: part_hits[x], reverse=True)[:5]
+            ]
+            return result
 
     # Fuzzy is suggestion-only.
     scored: List[Tuple[float, str]] = []

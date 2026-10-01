@@ -4,7 +4,7 @@
 PUMA_RFA.py
 - Scan Gmail label for RFAs (unread only by default, excluding already-processed)
 - Parse XLSX/CSV attachments + email body (qty/PN + "swap" detection)
-- Append to "<Project> - Project Tracker" (auto-create tab if missing)
+- Append only to one resolver-confirmed existing "<Project> - Project Tracker"
 - Mark old PN as Omitted + strike-through columns C–E
 - Mark processed threads with a Gmail label to avoid reprocessing
 """
@@ -25,6 +25,7 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 from puma_project_resolver import resolve_subject_to_existing_tracker
+from puma_runtime_config import required_env, test_safe_env, LIVE_PUMA_SPREADSHEET_ID
 
 # ---------------------------------------------------------------------------
 # CONFIG / ENVs
@@ -35,13 +36,10 @@ SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
 ]
 
-SPREADSHEET_ID = os.getenv("PUMA_SPREADSHEET_ID", "").strip()
-if not SPREADSHEET_ID:
-    print("ERROR: PUMA_SPREADSHEET_ID is not set.")
-    sys.exit(1)
+SPREADSHEET_ID = required_env("PUMA_SPREADSHEET_ID", LIVE_PUMA_SPREADSHEET_ID)
 
-RFA_LABEL_NAME = os.getenv("PUMA_RFA_LABEL_NAME", "PUMA - RFA")
-PROCESSED_LABEL_NAME = os.getenv("PUMA_RFA_PROCESSED_LABEL_NAME", "PUMA - RFA - Processed")
+RFA_LABEL_NAME = test_safe_env("PUMA_RFA_LABEL_NAME", "PUMA - RFA")
+PROCESSED_LABEL_NAME = test_safe_env("PUMA_RFA_PROCESSED_LABEL_NAME", "PUMA - RFA - Processed")
 PUMA_TRACKER_TEMPLATE_TAB = os.getenv("PUMA_TRACKER_TEMPLATE_TAB", "Project Tracker Template")
 
 # Query defaults to unread; we’ll always exclude the processed label
@@ -263,59 +261,6 @@ def sheet_titles_map(svc):
         props = sh.get("properties", {})
         out[props.get("title")] = props.get("sheetId")
     return out
-
-def create_tracker_tab_if_missing(svc, titles_map: dict, project_name: str) -> int:
-    """Ensure '<project> - Project Tracker' exists (duplicate template if present)."""
-    tab_title = f"{project_name} - Project Tracker"
-    if tab_title in titles_map:
-        return titles_map[tab_title]
-
-    ss = SPREADSHEET_ID
-    template_id = titles_map.get(PUMA_TRACKER_TEMPLATE_TAB)
-
-    if template_id:
-        resp = _call_with_backoff(
-            svc.spreadsheets().batchUpdate(
-                spreadsheetId=ss,
-                body={"requests":[{"duplicateSheet":{
-                    "sourceSheetId": template_id,
-                    "insertSheetIndex": 999,
-                    "newSheetName": tab_title
-                }}]}
-            ).execute
-        )
-        new_id = resp["replies"][0]["duplicateSheet"]["properties"]["sheetId"]
-        titles_map[tab_title] = new_id
-        return new_id
-
-    # Minimal new tab with headers
-    resp = _call_with_backoff(
-        svc.spreadsheets().batchUpdate(
-            spreadsheetId=ss,
-            body={"requests":[{"addSheet":{"properties":{
-                "title": tab_title,
-                "gridProperties":{"frozenRowCount":1}
-            }}}]}
-        ).execute
-    )
-    new_id = resp["replies"][0]["addSheet"]["properties"]["sheetId"]
-
-    headers = [
-        "Project","Source","Type","Part Number","Manufacturer","Quantity",
-        "Status","PO Number","Estimated Ship Date (ESD)",
-        "Date Received","Date Scheduled","Date Delivered"
-    ]
-    _call_with_backoff(
-        svc.spreadsheets().values().update(
-            spreadsheetId=ss,
-            range=f"{tab_title}!A1:L1",
-            valueInputOption="USER_ENTERED",
-            body={"values":[headers]}
-        ).execute
-    )
-
-    titles_map[tab_title] = new_id
-    return new_id
 
 def apply_omissions_and_append(svc, titles_map, tracker_tab, project_name, data_items, omit_pns, src_link, src_text):
     # RFA is an operational update. It may only modify a CONFIRMED existing tracker.
@@ -539,6 +484,7 @@ def run():
 
     page_token = None
     total = 0
+    error_count = 0
 
     while True:
         list_args = {
@@ -566,8 +512,10 @@ def run():
             try:
                 process_message(gm, sh, m)
             except HttpError as e:
+                error_count += 1
                 print(f"[RFA][ERROR] Gmail/Sheets API: {e}")
             except Exception as e:
+                error_count += 1
                 print(f"[RFA][ERROR] Unexpected: {e}")
 
         page_token = resp.get("nextPageToken")
@@ -575,7 +523,9 @@ def run():
             break
 
     if DEBUG:
-        print("[RFA] Done scanning label.")
+        print(f"[RFA] Done scanning label. errors={error_count}")
+    if error_count:
+        raise RuntimeError(f"RFA completed with {error_count} processing error(s)")
 
 if __name__ == "__main__":
     run()

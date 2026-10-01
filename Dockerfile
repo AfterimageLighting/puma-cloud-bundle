@@ -21,6 +21,8 @@ COPY PUMA_PO.py /app/PUMA_PO.py
 COPY PUMA_RR.py /app/PUMA_RR.py
 COPY PUMA_RFPS.py /app/PUMA_RFPS.py
 COPY PUMA_DR.py /app/PUMA_DR.py
+COPY puma_project_resolver.py /app/puma_project_resolver.py
+COPY puma_runtime_config.py /app/puma_runtime_config.py
 COPY lease.py /app/lease.py
 
 # Entrypoint writes secrets from env and runs the master
