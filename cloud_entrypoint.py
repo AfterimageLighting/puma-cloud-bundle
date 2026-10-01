@@ -5,7 +5,7 @@ import subprocess
 import pathlib
 from flask import Flask, jsonify
 from lease import run_with_lease
-from puma_runtime_config import TEST_MODE
+from puma_runtime_config import TEST_MODE, validate_test_environment
 
 APP_DIR = pathlib.Path(__file__).parent
 app = Flask(__name__)
@@ -22,6 +22,7 @@ def _write_if_env(env_key: str, out_path: pathlib.Path) -> bool:
             out_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
         except json.JSONDecodeError:
             out_path.write_text(val, encoding="utf-8")
+        os.chmod(out_path, 0o600)
         print(f"[ENTRYPOINT] wrote {out_path.name} from {env_key}", flush=True)
         return True
     except Exception as e:
@@ -61,6 +62,34 @@ def ensure_secrets() -> bool:
     if TEST_MODE or os.getenv("K_SERVICE"):
         return client_ok and token_ok
     return client_ok
+
+def _has_noninteractive_credential_source() -> bool:
+    env_refresh = bool(
+        os.getenv("GMAIL_CLIENT_ID")
+        and os.getenv("GMAIL_CLIENT_SECRET")
+        and os.getenv("GMAIL_REFRESH_TOKEN")
+    )
+    oauth_env = bool(
+        os.getenv("OAUTH_CLIENT_JSON")
+        and os.getenv("OAUTH_TOKEN_JSON")
+    )
+    oauth_files = bool(
+        (APP_DIR / "client_secrets.json").exists()
+        and (APP_DIR / "token.json").exists()
+    )
+    return env_refresh or oauth_env or oauth_files
+
+
+def static_readiness():
+    """Validate routing and credential inputs without calling Google APIs."""
+    try:
+        validate_test_environment()
+        if not _has_noninteractive_credential_source():
+            raise RuntimeError("No non-interactive Google OAuth credential source is configured.")
+        return True, "ready"
+    except Exception as e:
+        return False, str(e)
+
 
 # ----------------- orchestration -----------------
 def run_master() -> int:
@@ -102,7 +131,10 @@ def _puma_job(run_id: str, holder: str):
 # ----------------- HTTP routes -----------------
 @app.get("/healthz")
 def healthz():
-    return "ok", 200
+    ok, detail = static_readiness()
+    if ok:
+        return "ok", 200
+    return f"not ready: {detail}", 503
 
 @app.get("/")
 def root():
