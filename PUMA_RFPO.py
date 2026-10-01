@@ -33,12 +33,7 @@ def list_dr_messages(gmail):
 ALLOCATE_BY_QTY = True   # True = allocate qty across duplicate parts; False = approve all matches
 
 # ============================ Deps ============================
-try:
-    import pdfplumber  # type: ignore
-except ImportError:
-    print("Installing pdfplumber...")
-    os.system(f"{sys.executable} -m pip install pdfplumber")
-    import pdfplumber  # type: ignore
+import pdfplumber
 
 # ============================ Google auth/services ============================
 from google.auth.transport.requests import Request
