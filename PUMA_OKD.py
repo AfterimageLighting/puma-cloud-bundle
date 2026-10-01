@@ -10,9 +10,10 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from openpyxl import load_workbook
 from puma_project_resolver import resolve_okd_project, clean_subject_project
+from puma_runtime_config import test_safe_env
 
 # ============================ Config ============================
-SPREADSHEET_ID = os.getenv('PUMA_SPREADSHEET_ID', '1pwVlYSGVjyTCLt4GT7xU2TCnxfdJuxAbp_jU6Snisls').strip()
+SPREADSHEET_ID = test_safe_env('PUMA_SPREADSHEET_ID', '1pwVlYSGVjyTCLt4GT7xU2TCnxfdJuxAbp_jU6Snisls')
 SCOPES = [
     'https://www.googleapis.com/auth/gmail.readonly',
     'https://www.googleapis.com/auth/gmail.modify',
@@ -184,7 +185,7 @@ def get_emails(gmail_service):
     out = []
     req = gmail_service.users().messages().list(
         userId="me",
-        labelIds=[os.getenv('PUMA_OKD_LABEL_ID', 'Label_1716122347040870890')],
+        labelIds=[test_safe_env('PUMA_OKD_LABEL_ID', 'Label_1716122347040870890')],
         q="is:unread has:attachment",
         maxResults=100
     )
