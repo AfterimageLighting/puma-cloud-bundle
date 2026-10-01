@@ -187,8 +187,7 @@ def upload_pdf_to_drive(drive, parent_id: str, filename: str, data: bytes, make_
     media = MediaIoBaseUpload(io.BytesIO(data), mimetype="application/pdf", resumable=False)
     f = drive.files().create(body=body, media_body=media, fields="id, webViewLink", supportsAllDrives=True).execute()
     if make_public:
-        drive.permissions().create(fileId=f["id"], body={"role":"reader","type":"anyone"}, supportsAllDrives=True).execute()
-        f = drive.files().get(fileId=f["id"], fields="id, webViewLink", supportsAllDrives=True).execute()
+        raise RuntimeError("Public Drive sharing is disabled for PUMA uploads.")
     return f["id"], f["webViewLink"]
 
 # ---------- Canonicalization ----------
