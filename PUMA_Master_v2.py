@@ -73,7 +73,9 @@ def bootstrap_auth() -> None:
         from google.oauth2.credentials import Credentials
         from google_auth_oauthlib.flow import InstalledAppFlow
         from google.auth.transport.requests import Request
-    except Exception:
+    except Exception as e:
+        if TEST_MODE or os.getenv("K_SERVICE"):
+            raise RuntimeError("Google auth dependencies are missing in Cloud/Test runtime") from e
         print("[AUTH] Installing Google auth dependencies...")
         os.system(
             f"{sys.executable} -m pip install --quiet "
@@ -102,6 +104,11 @@ def bootstrap_auth() -> None:
                 print("[AUTH] Existing token.json missing scopes or cannot refresh; re-authorizing...")
         except Exception:
             print("[AUTH] token.json present but not usable for the union scopes; re-authorizing...")
+
+    if TEST_MODE or os.getenv("K_SERVICE"):
+        raise RuntimeError(
+            "Cloud/Test OAuth credentials are unusable or not refreshable; interactive authorization is disabled."
+        )
 
     if not os.path.exists("client_secrets.json"):
         print("ERROR: client_secrets.json not found in the current folder.")
